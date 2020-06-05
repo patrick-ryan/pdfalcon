@@ -58,16 +58,20 @@ def to_pdf_array_output(pdf_list):
 
 class PdfObject:
 
-    def __init__(self, object_number=None, generation_number=None):
-        # TODO: validate, autogenerate, add to cross-reference table
-        # TODO: probably do this somewhere else to make obj independent of body
-        self.object_number = object_number or self.file_body.generate_object_number()
-        self.generation_number = generation_number or 0
+    def __init__(self):
+        self.object_number = None
+        self.generation_number = None
+        self.attached = False
+        self.output = None
 
-        # TODO: probably do this somewhere else to make obj independent of body
-        self.file_body.add_object(self)
+    def attach(self, object_number, generation_number):
+        self.object_number = object_number
+        self.generation_number = generation_number
 
-    def to_pdf_output(self):
+        self.output = self.to_file_output()
+        self.attached = True
+
+    def to_file_output(self):
         output_parts = [
             f"{self.object_number} {self.generation_number} obj"
         ]
@@ -91,15 +95,27 @@ class PdfFile:
         self.cross_reference_table = cross_reference_table
         self.trailer = trailer
 
+    def add_pdf_object(self, pdf_object, is_free=False):
+        pdf_object = self.body.add_pdf_object(pdf_object)
+        entry = self.cross_reference_table.add_pdf_object(pdf_object, is_free=is_free)
+        return pdf_object, entry
+
     @classmethod
     def build(cls, header=None, body=None, cross_reference_table=None, trailer=None, version=None):
         version = get_optional_entry('version', version)
-        return cls(
-            header or cls.build_header(version),
-            body or cls.build_body(),
-            cross_reference_table or cls.build_cross_reference_table(),
-            trailer or cls.build_trailer()
-        )
+        header = header or cls.build_header(version)
+        body = body or cls.build_body()
+
+        page_tree_root = PageTreeNode([], 0, None)
+        document_catalog = DocumentCatalog(page_tree_root)
+        body.add_pdf_object(document_catalog)
+
+        cross_reference_table = cross_reference_table or cls.build_cross_reference_table()
+        cross_reference_table.add_pdf_object(document_catalog)
+
+        trailer = trailer or cls.build_trailer(cross_reference_table, document_catalog)
+
+        return cls(header, body, cross_reference_table, trailer)
 
     @staticmethod
     def build_header(version):
@@ -107,38 +123,34 @@ class PdfFile:
 
     @staticmethod
     def build_body():
-        # TODO
-        page_tree_root = PageTreeNode()
-        return
+        return FileBody()
 
     @staticmethod
     def build_cross_reference_table():
-        # TODO
-        return
+        return FileCrossReferenceTable([CRTSubsection([CrossReferenceEntry(0, 65535, True)], 0)])
 
     @staticmethod
-    def build_trailer():
-        # TODO
-        return
+    def build_trailer(cross_reference_table, document_catalog):
+        return FileTrailer(cross_reference_table, document_catalog)
 
     def add_page(self):
         # TODO
         page = PageObject()
         return page
 
-    def to_pdf_output(self):
+    def to_file_output(self):
         output_parts = [
-            self.header.to_pdf_output(),
-            self.body.to_pdf_output(),
-            self.cross_reference_table.to_pdf_output(),
-            self.trailer.to_pdf_output(),
+            self.header.output,
+            self.body.output,
+            self.cross_reference_table.output,
+            self.trailer.output,
         ]
         return '\n'.join(output_parts)
 
     def to_bytes(self):
         # TODO: is utf-8 okay for this?
         # might want to make encoding/compressing/other-filtering a utility
-        return self.to_pdf_output().encode()
+        return self.output.encode()
 
     def write(self, io_buffer, linearized=False):
         # TODO: possibly make linearized the default to optimize web read performance
@@ -147,20 +159,38 @@ class PdfFile:
 
 class FileBody:
 
-    def __init__(self, document_catalog):
-        self.document_catalog = document_catalog
+    def __init__(self):
+        self.objects = {}
         self.max_object_number = None
+
+        self.output = self.to_file_output()
+
+    def add_pdf_object(self, pdf_object):
+        if pdf_object.attached is True:
+            raise Exception
+        object_number = self.generate_object_number()
+        if object_number in self.objects:
+            generation_number = max(self.objects[object_number])+1
+        else:
+            self.objects[object_number] = {}
+            generation_number = 0
+        self.objects[object_number][generation_number] = pdf_object
+        pdf_object.attach(object_number, generation_number)
+        return pdf_object
 
     def generate_object_number(self):
         # TODO: rewrite this
-        # should interface with the cross-reference table and interpreter-lock the logic
-        # this will be very important to get right!
         if self.max_object_number is None:
-            object_number = 0
-        else:
-            object_number = self.max_object_number + 1
-        self.max_object_number = object_number
-        return object_number
+            self.max_object_number = 0
+        self.max_object_number += 1
+        return self.max_object_number
+
+    def to_file_output(self):
+        sorted_objects = []
+        for object_number in sorted(self.objects):
+            for generation_number in sorted(self.objects[object_number]):
+                sorted_objects.append(self.objects[object_number][generation_number])
+        return '\n'.join([pdf_object.output for pdf_object in sorted_objects])
 
 
 class FileHeader:
@@ -168,18 +198,82 @@ class FileHeader:
     def __init__(self, version):
         self.version = version
 
-    def to_pdf_output(self):
+        self.output = self.to_file_output()
+
+    def to_file_output(self):
         return f"%PDF-{self.version}"
 
 
 class FileCrossReferenceTable:
-    # TODO
-    pass
+
+    def __init__(self, subsections):
+        self.subsections = subsections
+
+        self.current_crt_subsection_index = 0
+        self.next_object_byte_offset = None
+
+        self.output = self.to_file_output()
+
+    def add_pdf_object(self, pdf_object, is_free=False):
+        subsection = self.subsections[self.current_crt_subsection_index]
+        if self.next_object_byte_offset is None:
+            self.next_object_byte_offset = len(self.header.output)
+        byte_offset = self.next_object_byte_offset
+        self.next_object_byte_offset += len(pdf_object.output)
+        entry = CrossReferenceEntry(byte_offset, pdf_object.generation_number, is_free)
+        subsection.entries.append(entry)
+        return entry
+
+    def to_file_output(self):
+        return f"{self.first_object_number} {len(self.entries)}\n"
+            '\n'.join([subsection.output for subsection in self.subsections])
+
+
+class CRTSubsection:
+
+    def __init__(self, entries, first_object_number):
+        self.entries = entries
+        self.first_object_number = first_object_number
+
+        self.output = self.to_file_output()
+
+    def to_file_output(self):
+        return f"{self.first_object_number} {len(self.entries)}\n"
+            '\n'.join([entry.output for entry in self.entries])
+
+
+class CrossReferenceEntry:
+
+    def __init__(self, byte_offset, generation_number, is_free):
+        self.byte_offset = byte_offset
+        self.generation_number = generation_number
+        self.is_free = is_free
+
+        self.output = self.to_file_output()
+
+    def to_file_output(self):
+        return f"{self.byte_offset:010} {self.generation_number:05} {'f' if self.is_free is True else 'n'}"
 
 
 class FileTrailer:
-    # TODO
-    pass
+
+    def __init__(self, cross_reference_table, document_catalog):
+        self.cross_reference_table = cross_reference_table
+        self.document_catalog = document_catalog
+
+        self.output = self.to_file_output()
+
+    def to_file_output(self):
+        output_parts = ['trailer']
+        pdf_dict = {
+            '/Root': self.document_catalog.to_pdf_ref_output()
+        }
+        output_parts.append(to_pdf_dict_output(pdf_dict))
+        output_parts.append('startxref')
+        # TODO
+        output_parts.append('<cross_reference_table byte offset>')
+        output_parts.append('%%EOF')
+        return '\n'.join(output_parts)
 
 
 class DocumentCatalog(PdfObject):
@@ -196,8 +290,8 @@ class DocumentCatalog(PdfObject):
             # article_threads=None,
             # named_destinations=None,
             # interactive_form=None,
-            **kwargs):
-        super().__init__(**kwargs)
+            ):
+        super().__init__()
         self.page_tree = page_tree
 
         self.version = get_optional_entry('version', version)
@@ -225,10 +319,12 @@ class PageTreeNode(PdfObject):
     obj_type = 'Pages'
 
     def __init__(self, kids, count, parent, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__()
         self.kids = kids
         self.count = count
         self.parent = parent
+
+        self.resources = resources
 
     def to_dict():
         pdf_dict = {
@@ -246,7 +342,7 @@ class PageObject(PdfObject):
     obj_type = 'Page'
 
     def __init__(self, parent, resources, media_box, contents=None, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__()
         self.parent = parent
         self.resources = resources
         self.media_box = media_box
