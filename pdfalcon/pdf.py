@@ -62,16 +62,16 @@ class PdfObject:
         self.object_number = None
         self.generation_number = None
         self.attached = False
-        self.output = None
+        # TODO: determine best way to set this, might be better removed and left to the writing process to figure out
+        self.byte_offset = None
+        self.free = False
 
     def attach(self, object_number, generation_number):
         self.object_number = object_number
         self.generation_number = generation_number
-
-        self.output = self.to_file_output()
         self.attached = True
 
-    def to_file_output(self):
+    def format(self):
         output_parts = [
             f"{self.object_number} {self.generation_number} obj"
         ]
@@ -102,73 +102,64 @@ class PdfFile:
 
     @classmethod
     def build(cls, header=None, body=None, cross_reference_table=None, trailer=None, version=None):
+        # create the basic structure of a pdf file
         version = get_optional_entry('version', version)
-        header = header or cls.build_header(version)
-        body = body or cls.build_body()
+        header = header or FileHeader(version)
 
+        body = body or FileBody()
         page_tree_root = PageTreeNode([], 0, None)
         document_catalog = DocumentCatalog(page_tree_root)
         body.add_pdf_object(document_catalog)
 
-        cross_reference_table = cross_reference_table or cls.build_cross_reference_table()
+        free_object = PdfObject()
+        free_object.object_number = 0
+        free_object.generation_number = 65535
+        free_object.byte_offset = 0
+        free_object.free = True
+        first_entry = CrossReferenceEntry(free_object)
+        subsections = [CRTSubsection([first_entry])]
+        cross_reference_table = cross_reference_table or FileCrossReferenceTable(subsections)
         cross_reference_table.add_pdf_object(document_catalog)
 
-        trailer = trailer or cls.build_trailer(cross_reference_table, document_catalog)
+        trailer = trailer or FileTrailer(cross_reference_table, document_catalog)
 
         return cls(header, body, cross_reference_table, trailer)
-
-    @staticmethod
-    def build_header(version):
-        return FileHeader(version)
-
-    @staticmethod
-    def build_body():
-        return FileBody()
-
-    @staticmethod
-    def build_cross_reference_table():
-        return FileCrossReferenceTable([CRTSubsection([CrossReferenceEntry(0, 65535, True)], 0)])
-
-    @staticmethod
-    def build_trailer(cross_reference_table, document_catalog):
-        return FileTrailer(cross_reference_table, document_catalog)
 
     def add_page(self):
         # TODO
         page = PageObject()
         return page
 
-    def to_file_output(self):
+    def format(self):
+        self.header.format()
         output_parts = [
-            self.header.output,
-            self.body.output,
-            self.cross_reference_table.output,
-            self.trailer.output,
+            ,
+            self.body.format(),
+            self.cross_reference_table.format(),
+            self.trailer.format(),
         ]
         return '\n'.join(output_parts)
 
-    def to_bytes(self):
-        # TODO: is utf-8 okay for this?
-        # might want to make encoding/compressing/other-filtering a utility
-        return self.output.encode()
-
     def write(self, io_buffer, linearized=False):
-        # TODO: possibly make linearized the default to optimize web read performance
-        io_buffer.write(self.to_bytes())
+        # TODO: encoding must be handled specially based on the objects being used in PDF
+        # the encoding will also determine how the cross-reference table and trailer get built
+        # might want to make encoding/compressing/other-filtering a utility
+        # possibly make linearized the default to optimize web read performance
+        io_buffer.write()
 
 
 class FileBody:
 
     def __init__(self):
         self.objects = {}
-        self.max_object_number = None
 
-        self.output = self.to_file_output()
+        # dynamically determined based on size of header
+        self.byte_offset = None
 
     def add_pdf_object(self, pdf_object):
         if pdf_object.attached is True:
             raise Exception
-        object_number = self.generate_object_number()
+        object_number = max(self.objects)+1
         if object_number in self.objects:
             generation_number = max(self.objects[object_number])+1
         else:
@@ -178,19 +169,12 @@ class FileBody:
         pdf_object.attach(object_number, generation_number)
         return pdf_object
 
-    def generate_object_number(self):
-        # TODO: rewrite this
-        if self.max_object_number is None:
-            self.max_object_number = 0
-        self.max_object_number += 1
-        return self.max_object_number
-
-    def to_file_output(self):
+    def format(self):
         sorted_objects = []
         for object_number in sorted(self.objects):
             for generation_number in sorted(self.objects[object_number]):
                 sorted_objects.append(self.objects[object_number][generation_number])
-        return '\n'.join([pdf_object.output for pdf_object in sorted_objects])
+        return '\n'.join([pdf_object.format() for pdf_object in sorted_objects])
 
 
 class FileHeader:
@@ -198,9 +182,7 @@ class FileHeader:
     def __init__(self, version):
         self.version = version
 
-        self.output = self.to_file_output()
-
-    def to_file_output(self):
+    def format(self):
         return f"%PDF-{self.version}"
 
 
@@ -212,47 +194,39 @@ class FileCrossReferenceTable:
         self.current_crt_subsection_index = 0
         self.next_object_byte_offset = None
 
-        self.output = self.to_file_output()
-
-    def add_pdf_object(self, pdf_object, is_free=False):
+    def add_pdf_object(self, pdf_object):
         subsection = self.subsections[self.current_crt_subsection_index]
-        if self.next_object_byte_offset is None:
-            self.next_object_byte_offset = len(self.header.output)
-        byte_offset = self.next_object_byte_offset
-        self.next_object_byte_offset += len(pdf_object.output)
-        entry = CrossReferenceEntry(byte_offset, pdf_object.generation_number, is_free)
+        entry = CrossReferenceEntry(pdf_object)
         subsection.entries.append(entry)
         return entry
 
-    def to_file_output(self):
-        return f"{self.first_object_number} {len(self.entries)}\n"
-            '\n'.join([subsection.output for subsection in self.subsections])
+    def format(self):
+        return "xref"
+            '\n'.join([subsection.format() for subsection in self.subsections])
 
 
 class CRTSubsection:
 
-    def __init__(self, entries, first_object_number):
+    def __init__(self, entries):
         self.entries = entries
-        self.first_object_number = first_object_number
 
-        self.output = self.to_file_output()
-
-    def to_file_output(self):
-        return f"{self.first_object_number} {len(self.entries)}\n"
-            '\n'.join([entry.output for entry in self.entries])
+    def format(self):
+        if len(self.entries) == 0:
+            raise Exception
+        first_object_number = self.entries[0].pdf_object.object_number
+        return f"{first_object_number} {len(self.entries)}\n"
+            '\n'.join([entry.format() for entry in self.entries])
 
 
 class CrossReferenceEntry:
 
-    def __init__(self, byte_offset, generation_number, is_free):
-        self.byte_offset = byte_offset
-        self.generation_number = generation_number
-        self.is_free = is_free
+    def __init__(self, pdf_object):
+        self.pdf_object = pdf_object
 
-        self.output = self.to_file_output()
-
-    def to_file_output(self):
-        return f"{self.byte_offset:010} {self.generation_number:05} {'f' if self.is_free is True else 'n'}"
+    def format(self):
+        if self.pdf_object.byte_offset is None:
+            raise Exception
+        return f"{self.pdf_object.byte_offset:010} {self.pdf_object.generation_number:05} {'f' if self.pdf_object.free is True else 'n'}"
 
 
 class FileTrailer:
@@ -261,9 +235,7 @@ class FileTrailer:
         self.cross_reference_table = cross_reference_table
         self.document_catalog = document_catalog
 
-        self.output = self.to_file_output()
-
-    def to_file_output(self):
+    def format(self):
         output_parts = ['trailer']
         pdf_dict = {
             '/Root': self.document_catalog.to_pdf_ref_output()
