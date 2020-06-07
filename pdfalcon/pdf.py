@@ -1,4 +1,7 @@
 
+from io import BytesIO
+
+
 OPTIONS = {
     'version': {
         'default': '1.4',
@@ -62,16 +65,22 @@ class PdfObject:
         self.object_number = None
         self.generation_number = None
         self.attached = False
-        # TODO: determine best way to set this, might be better removed and left to the writing process to figure out
-        self.byte_offset = None
         self.free = False
+        self.next_free_object = None
 
     def attach(self, object_number, generation_number):
+        # attached means the object has been associated to the pdf body
         self.object_number = object_number
         self.generation_number = generation_number
         self.attached = True
 
+    def delete(self, zeroth_object):
+        self.next_free_object = zeroth_object
+        self.free = True
+
     def format(self):
+        if attached is False:
+            return Exception
         output_parts = [
             f"{self.object_number} {self.generation_number} obj"
         ]
@@ -81,9 +90,12 @@ class PdfObject:
             output_parts.append(to_pdf_dict_output(pdf_dict))
 
         output_parts.append("endobj")
-        return '\n'.join(output_parts)
+        return '\n'.join(output_parts)+'\n'
 
     def to_pdf_ref_output(self):
+        # TODO: maybe make ref a separate class
+        if attached is False:
+            return Exception
         return f"{self.object_number} {self.generation_number} R"
 
 
@@ -106,22 +118,20 @@ class PdfFile:
         version = get_optional_entry('version', version)
         header = header or FileHeader(version)
 
-        body = body or FileBody()
-        page_tree_root = PageTreeNode([], 0, None)
-        document_catalog = DocumentCatalog(page_tree_root)
-        body.add_pdf_object(document_catalog)
+        if body is None:
+            body = FileBody()
+            page_tree_root = PageTreeNode([], 0, None)
+            document_catalog = DocumentCatalog(page_tree_root)
+            body.add_pdf_object(document_catalog)
 
-        free_object = PdfObject()
-        free_object.object_number = 0
-        free_object.generation_number = 65535
-        free_object.byte_offset = 0
-        free_object.free = True
-        first_entry = CrossReferenceEntry(free_object)
-        subsections = [CRTSubsection([first_entry])]
-        cross_reference_table = cross_reference_table or FileCrossReferenceTable(subsections)
-        cross_reference_table.add_pdf_object(document_catalog)
+        if cross_reference_table is None:
+            first_entry = CrossReferenceEntry(free_object)
+            subsections = [CRTSubsection([first_entry])]
+            cross_reference_table = FileCrossReferenceTable(subsections)
+            cross_reference_table.add_pdf_object(document_catalog)
 
-        trailer = trailer or FileTrailer(cross_reference_table, document_catalog)
+        if trailer is None:
+            trailer = trailer or FileTrailer(cross_reference_table, document_catalog)
 
         return cls(header, body, cross_reference_table, trailer)
 
@@ -131,12 +141,13 @@ class PdfFile:
         return page
 
     def format(self):
-        self.header.format()
+        header = self.header.format()
+        body, byte_offset_object_map, crt_byte_offset = self.body.format(len(header))
         output_parts = [
-            ,
-            self.body.format(),
-            self.cross_reference_table.format(),
-            self.trailer.format(),
+            header,
+            body,
+            self.cross_reference_table.format(byte_offset_object_map),
+            self.trailer.format(crt_byte_offset),
         ]
         return '\n'.join(output_parts)
 
@@ -145,6 +156,8 @@ class PdfFile:
         # the encoding will also determine how the cross-reference table and trailer get built
         # might want to make encoding/compressing/other-filtering a utility
         # possibly make linearized the default to optimize web read performance
+        if not isinstance(io_buffer, BytesIO):
+            raise Exception
         io_buffer.write()
 
 
@@ -152,29 +165,57 @@ class FileBody:
 
     def __init__(self):
         self.objects = {}
+        self.free_object_list_tail = None
 
-        # dynamically determined based on size of header
-        self.byte_offset = None
+        # the zeroth object
+        self.zeroth_object = PdfObject()
+        self.add_pdf_object(self.zeroth_object)
+        self.delete_pdf_object(self.zeroth_object)
 
     def add_pdf_object(self, pdf_object):
         if pdf_object.attached is True:
-            raise Exception
-        object_number = max(self.objects)+1
-        if object_number in self.objects:
-            generation_number = max(self.objects[object_number])+1
+            object_number = pdf_object.object_number
+            generation_number = pdf_object.generation_number
+            if object_number is None:
+                raise Exception
+            if generation_number is None:
+                raise Exception
+            if generation_number == 65535:
+                raise Exception
+            generation_number += 1
         else:
+            if len(self.objects) > 0:
+                max_object_number, _ = sorted(self.objects)[-1]
+                object_number = max_object_number + 1
+                generation_number = 0
+            else:
+                # the zeroth object
+                object_number = 0
+                generation_number = 65535
             self.objects[object_number] = {}
-            generation_number = 0
-        self.objects[object_number][generation_number] = pdf_object
+        self.objects[(object_number, generation_number)] = pdf_object
         pdf_object.attach(object_number, generation_number)
         return pdf_object
 
-    def format(self):
-        sorted_objects = []
-        for object_number in sorted(self.objects):
-            for generation_number in sorted(self.objects[object_number]):
-                sorted_objects.append(self.objects[object_number][generation_number])
-        return '\n'.join([pdf_object.format() for pdf_object in sorted_objects])
+    def delete_pdf_object(self, pdf_object):
+        # produces a free object
+        pdf_object.delete(self.zeroth_object)
+        if self.free_object_list_tail is not None:
+            # set previous tail's next free object
+            self.free_object_list_tail.next_free_object = pdf_object
+        self.free_object_list_tail = pdf_object
+        return pdf_object
+
+    def format(self, byte_offset):
+        output_parts = []
+        byte_offset_object_map = {}
+        for k in sorted(self.objects):
+            pdf_object = self.objects[k]
+            if pdf_object.free is False:
+                formatted_object = pdf_object.format()
+                byte_offset_object_map[(pdf_object.object_number, pdf_object.generation_number)] = byte_offset
+                byte_offset += len(formatted_object)
+        return '\n'.join(output_parts), byte_offset_object_map, byte_offset
 
 
 class FileHeader:
@@ -192,7 +233,6 @@ class FileCrossReferenceTable:
         self.subsections = subsections
 
         self.current_crt_subsection_index = 0
-        self.next_object_byte_offset = None
 
     def add_pdf_object(self, pdf_object):
         subsection = self.subsections[self.current_crt_subsection_index]
@@ -200,9 +240,9 @@ class FileCrossReferenceTable:
         subsection.entries.append(entry)
         return entry
 
-    def format(self):
+    def format(self, byte_offset_object_map):
         return "xref"
-            '\n'.join([subsection.format() for subsection in self.subsections])
+            '\n'.join([subsection.format(byte_offset_object_map) for subsection in self.subsections])
 
 
 class CRTSubsection:
@@ -210,12 +250,12 @@ class CRTSubsection:
     def __init__(self, entries):
         self.entries = entries
 
-    def format(self):
+    def format(self, byte_offset_object_map):
         if len(self.entries) == 0:
             raise Exception
         first_object_number = self.entries[0].pdf_object.object_number
         return f"{first_object_number} {len(self.entries)}\n"
-            '\n'.join([entry.format() for entry in self.entries])
+            '\n'.join([entry.format(byte_offset_object_map) for entry in self.entries])
 
 
 class CrossReferenceEntry:
@@ -223,10 +263,17 @@ class CrossReferenceEntry:
     def __init__(self, pdf_object):
         self.pdf_object = pdf_object
 
-    def format(self):
-        if self.pdf_object.byte_offset is None:
-            raise Exception
-        return f"{self.pdf_object.byte_offset:010} {self.pdf_object.generation_number:05} {'f' if self.pdf_object.free is True else 'n'}"
+    def format(self, byte_offset_object_map):
+        if self.pdf_object.free is True:
+            first_item = self.pdf_object.next_free_object.object_number
+            generation_number = self.pdf_object.generation_number
+            if generation_number != 65535:
+                # next generation number should this object be used again
+                generation_number += 1
+        else:
+            first_item = byte_offset_object_map[(pdf_object.object_number, pdf_object.generation_number)]
+            generation_number = self.pdf_object.generation_number
+        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'}"
 
 
 class FileTrailer:
@@ -235,15 +282,14 @@ class FileTrailer:
         self.cross_reference_table = cross_reference_table
         self.document_catalog = document_catalog
 
-    def format(self):
+    def format(self, crt_byte_offset):
         output_parts = ['trailer']
         pdf_dict = {
             '/Root': self.document_catalog.to_pdf_ref_output()
         }
         output_parts.append(to_pdf_dict_output(pdf_dict))
         output_parts.append('startxref')
-        # TODO
-        output_parts.append('<cross_reference_table byte offset>')
+        output_parts.append(str(crt_byte_offset))
         output_parts.append('%%EOF')
         return '\n'.join(output_parts)
 
