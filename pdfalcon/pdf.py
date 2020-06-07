@@ -36,7 +36,7 @@ def get_optional_entry(key, val):
 
 
 def get_inherited_entry(key, node, required=False):
-    val = getattr(kid, key)
+    val = getattr(node, key)
     if val is None:
         if node.parent is not None:
             val = get_inherited_entry(key, node.parent)
@@ -56,7 +56,7 @@ def to_pdf_dict_output(pdf_dict):
 
 
 def to_pdf_array_output(pdf_list):
-    return ' '.join(['[', *pdf_list, ']'])
+    return ' '.join(['[', *[str(i) for i in pdf_list], ']'])
 
 
 class PdfObject:
@@ -86,7 +86,7 @@ class PdfObject:
         ]
         if self.obj_datatype is dict:
             pdf_dict = {
-                '/Type': self.obj_type
+                '/Type': f"/{self.obj_type}"
             }
             pdf_dict.update(self.to_dict())
             output_parts.append(to_pdf_dict_output(pdf_dict))
@@ -128,13 +128,13 @@ class PdfFile:
         return cls(header, body, cross_reference_table, trailer)
 
     def add_page(self):
-        # TODO
-        page = PageObject()
+        page = self.body.page_tree_root.add_page()
+        page, _ = self.add_pdf_object(page)
         return page
 
     def format(self):
         header = self.header.format()
-        body, byte_offset_object_map, crt_byte_offset = self.body.format(len(header))
+        body, byte_offset_object_map, crt_byte_offset = self.body.format(len(header)+1)
         output_parts = [
             header,
             body,
@@ -211,7 +211,7 @@ class FileBody:
             if pdf_object.free is False:
                 formatted_object = pdf_object.format()
                 byte_offset_object_map[(pdf_object.object_number, pdf_object.generation_number)] = byte_offset
-                byte_offset += len(formatted_object)
+                byte_offset += len(formatted_object)+1
                 output_parts.append(formatted_object)
         return '\n'.join(output_parts), byte_offset_object_map, byte_offset
 
@@ -222,7 +222,11 @@ class FileHeader:
         self.version = version
 
     def format(self):
-        return f"%PDF-{self.version}"
+        output_parts = [
+            f"%PDF-{self.version}",
+            "%âãÏÓ"
+        ]
+        return '\n'.join(output_parts)
 
 
 class FileCrossReferenceTable:
@@ -287,7 +291,8 @@ class FileTrailer:
     def format(self, crt_byte_offset):
         output_parts = ['trailer']
         pdf_dict = {
-            '/Root': self.document_catalog.to_pdf_ref_output()
+            '/Root': self.document_catalog.to_pdf_ref_output(),
+            '/Size': sum(len(s.entries) for s in self.cross_reference_table.subsections)
         }
         output_parts.append(to_pdf_dict_output(pdf_dict))
         output_parts.append('startxref')
@@ -344,7 +349,7 @@ class PageTreeNode(PdfObject):
         self.count = count
         self.parent = parent
 
-        self.resources = 'meow'
+        self.resources = {}
 
     def to_dict(self):
         pdf_dict = {
@@ -354,6 +359,12 @@ class PageTreeNode(PdfObject):
         if self.parent is not None:
             pdf_dict['/Parent'] = self.parent.to_pdf_ref_output()
         return pdf_dict
+
+    def add_page(self):
+        page = PageObject(self, None, OPTIONS['media_box']['default'])
+        self.kids.append(page)
+        self.count += 1
+        return page
 
 
 class PageObject(PdfObject):
