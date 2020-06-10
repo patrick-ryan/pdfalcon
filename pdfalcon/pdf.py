@@ -1,3 +1,4 @@
+import math
 
 from io import BytesIO
 
@@ -5,24 +6,70 @@ from io import BytesIO
 OPTIONS = {
     'version': {
         'default': '1.4',
-        'options': {'1.4', '1.5', '1.6', '1.7'}
+        'options': {'1.4': {}, '1.5': {}, '1.6': {}, '1.7': {}}
     },
     'page_layout': {
         'default': 'single_page',
         'options': {
-            'single_page',      # Display one page at a time
-            'one_column',       # Display the pages in one column 
-            'two_column_left',  # Display the pages in two columns, with odd-numbered pages on the left
-            'two_column_right', # Display the pages in two columns, with odd-numbered pages on the right
-            'two_page_left',    # (PDF 1.5) Display the pages two at a time, with odd-numbered pages on the left
-            'two_page_right',   # (PDF 1.5) Display the pages two at a time, with odd-numbered pages on the right
+            'single_page': {},      # Display one page at a time
+            'one_column': {},       # Display the pages in one column 
+            'two_column_left': {},  # Display the pages in two columns, with odd-numbered pages on the left
+            'two_column_right': {}, # Display the pages in two columns, with odd-numbered pages on the right
+            'two_page_left': {},    # (PDF 1.5) Display the pages two at a time, with odd-numbered pages on the left
+            'two_page_right': {},   # (PDF 1.5) Display the pages two at a time, with odd-numbered pages on the right
         }
     },
     'media_box': {
         'default': [0, 0, 612, 792]
-    }
+    },
+    'font': {
+        'default': 'Helvetica',
+        'options': {
+            'Times-Roman': {
+                'sub_type': 'Type1'
+            },
+            'Helvetica': {
+                'sub_type': 'Type1'
+            },
+            'Courier': {
+                'sub_type': 'Type1'
+            },
+            'Symbol': {
+                'sub_type': 'Type1'
+            },
+            'Times-Bold': {
+                'sub_type': 'Type1'
+            },
+            'Helvetica-Bold': {
+                'sub_type': 'Type1'
+            },
+            'Courier-Bold': {
+                'sub_type': 'Type1'
+            },
+            'ZapfDingbats': {
+                'sub_type': 'Type1'
+            },
+            'Times-Italic': {
+                'sub_type': 'Type1'
+            },
+            'Helvetica-Oblique': {
+                'sub_type': 'Type1'
+            },
+            'Courier-Oblique': {
+                'sub_type': 'Type1'
+            },
+            'Times-BoldItalic': {
+                'sub_type': 'Type1'
+            },
+            'Helvetica-BoldOblique': {
+                'sub_type': 'Type1'
+            },
+            'Courier-BoldOblique': {
+                'sub_type': 'Type1'
+            },
+        }
+    },
 }
-
 
 def get_optional_entry(key, val):
     if val is None:
@@ -32,7 +79,8 @@ def get_optional_entry(key, val):
             val = OPTIONS[key]['default']
     if 'options' in OPTIONS[key] and val not in OPTIONS[key]['options']:
         raise Exception
-    return val
+    settings = OPTIONS[key]['options'][val] if 'options' in OPTIONS[key] else {}
+    return val, settings
 
 
 def get_inherited_entry(key, node, required=False):
@@ -45,18 +93,20 @@ def get_inherited_entry(key, node, required=False):
     return val
 
 
-def to_pdf_dict_output(pdf_dict):
-    # TODO: make prettier
-    output_parts = [
-        '<<',
-        *[f"{k} {v}" for k,v in pdf_dict.items()],
-        '>>'
-    ]
-    return '\n'.join(output_parts)
-
-
-def to_pdf_array_output(pdf_list):
-    return ' '.join(['[', *[str(i) for i in pdf_list], ']'])
+def format_type(data):
+    if isinstance(data, list):
+        return ' '.join(['[', *[format_type(x) for x in data], ']'])
+    elif isinstance(data, dict):
+        output_lines = [
+            '<<',
+            *[f"{k} {format_type(v)}" for k,v in data.items()],
+            '>>'
+        ]
+        return '\n'.join(output_lines)
+    elif isinstance(data, int) or isinstance(data, float):
+        return str(data)
+    else:
+        return data
 
 
 class PdfObject:
@@ -81,20 +131,26 @@ class PdfObject:
     def format(self):
         if self.attached is False:
             raise Exception
-        output_parts = [
+        output_lines = [
             f"{self.object_number} {self.generation_number} obj"
         ]
-        if self.obj_datatype is dict:
+        if self.obj_datatype == 'dictionary':
             pdf_dict = {
-                '/Type': f"/{self.obj_type}"
+                '/Type': self.obj_type
             }
             pdf_dict.update(self.to_dict())
-            output_parts.append(to_pdf_dict_output(pdf_dict))
+            output_lines.append(format_type(pdf_dict))
+        elif self.obj_datatype == 'stream':
+            output_lines.extend([
+                'stream',
+                self.to_stream(),
+                'endstream'
+            ])
 
-        output_parts.append("endobj")
-        return '\n'.join(output_parts)+'\n'
+        output_lines.append("endobj")
+        return '\n'.join(output_lines)+'\n'
 
-    def to_pdf_ref_output(self):
+    def format_ref(self):
         # TODO: maybe make ref a separate class
         if self.attached is False:
             raise Exception
@@ -103,45 +159,33 @@ class PdfObject:
 
 class PdfFile:
 
-    def __init__(self, header, body, cross_reference_table, trailer):
-        self.header = header
-        self.body = body
-        self.cross_reference_table = cross_reference_table
-        self.trailer = trailer
+    def __init__(self, header=None, body=None, cross_reference_table=None, trailer=None, version=None):
+        self.version, _ = get_optional_entry('version', version)
+        self.header = header or FileHeader(self)
+        self.body = body or FileBody(self)
+        self.cross_reference_table = cross_reference_table or FileCrossReferenceTable(self)
+        self.trailer = trailer or FileTrailer(self)
 
     def add_pdf_object(self, pdf_object):
         pdf_object = self.body.add_pdf_object(pdf_object)
         entry = self.cross_reference_table.add_pdf_object(pdf_object)
         return pdf_object, entry
 
-    @classmethod
-    def build(cls, header=None, body=None, cross_reference_table=None, trailer=None, version=None):
-        # create the basic structure of a pdf file
-        version = get_optional_entry('version', version)
-        header = header or FileHeader(version)
-        body = body or FileBody()
-        cross_reference_table = cross_reference_table or FileCrossReferenceTable()
-        cross_reference_table.add_pdf_object(body.zeroth_object)
-        cross_reference_table.add_pdf_object(body.document_catalog)
-        cross_reference_table.add_pdf_object(body.page_tree_root)
-        trailer = trailer or FileTrailer(cross_reference_table, body.document_catalog)
-        return cls(header, body, cross_reference_table, trailer)
-
     def add_page(self):
         page = self.body.page_tree_root.add_page()
-        page, _ = self.add_pdf_object(page)
+        self.add_pdf_object(page)
         return page
 
     def format(self):
         header = self.header.format()
         body, byte_offset_object_map, crt_byte_offset = self.body.format(len(header)+1)
-        output_parts = [
+        output_lines = [
             header,
             body,
             self.cross_reference_table.format(byte_offset_object_map),
             self.trailer.format(crt_byte_offset),
         ]
-        return '\n'.join(output_parts)
+        return '\n'.join(output_lines)
 
     def write(self, io_buffer, linearized=False):
         # TODO: encoding must be handled specially based on the objects being used in PDF
@@ -155,8 +199,10 @@ class PdfFile:
 
 class FileBody:
 
-    def __init__(self):
+    def __init__(self, pdf_file):
+        self.pdf_file = pdf_file
         self.objects = {}
+        self.fonts = {}
 
         # the zeroth object
         self.zeroth_object = PdfObject()
@@ -165,7 +211,7 @@ class FileBody:
         self.free_object_list_tail = self.zeroth_object
 
         # the document catalog object
-        self.page_tree_root = PageTreeNode([], 0, None)
+        self.page_tree_root = PageTreeNode(self.pdf_file)
         self.document_catalog = DocumentCatalog(self.page_tree_root)
         self.add_pdf_object(self.document_catalog)
         self.add_pdf_object(self.page_tree_root)
@@ -191,6 +237,8 @@ class FileBody:
                 object_number = 0
                 generation_number = 65535
         self.objects[(object_number, generation_number)] = pdf_object
+        if isinstance(pdf_object, Font):
+            self.fonts[pdf_object.font_name] = pdf_object
         pdf_object.attach(object_number, generation_number)
         return pdf_object
 
@@ -204,7 +252,7 @@ class FileBody:
         return pdf_object
 
     def format(self, byte_offset):
-        output_parts = []
+        output_lines = []
         byte_offset_object_map = {}
         for k in sorted(self.objects):
             pdf_object = self.objects[k]
@@ -212,28 +260,33 @@ class FileBody:
                 formatted_object = pdf_object.format()
                 byte_offset_object_map[(pdf_object.object_number, pdf_object.generation_number)] = byte_offset
                 byte_offset += len(formatted_object)+1
-                output_parts.append(formatted_object)
-        return '\n'.join(output_parts), byte_offset_object_map, byte_offset
+                output_lines.append(formatted_object)
+        return '\n'.join(output_lines), byte_offset_object_map, byte_offset
 
 
 class FileHeader:
     
-    def __init__(self, version):
-        self.version = version
+    def __init__(self, pdf_file):
+        self.pdf_file = pdf_file
 
     def format(self):
-        output_parts = [
-            f"%PDF-{self.version}",
+        output_lines = [
+            f"%PDF-{self.pdf_file.version}",
             "%âãÏÓ"
         ]
-        return '\n'.join(output_parts)
+        return '\n'.join(output_lines)
 
 
 class FileCrossReferenceTable:
 
-    def __init__(self):
+    def __init__(self, pdf_file):
+        self.pdf_file = pdf_file
         self.subsections = None
         self.current_crt_subsection_index = None
+
+        self.add_pdf_object(self.pdf_file.body.zeroth_object)
+        self.add_pdf_object(self.pdf_file.body.document_catalog)
+        self.add_pdf_object(self.pdf_file.body.page_tree_root)
 
     def add_pdf_object(self, pdf_object):
         if self.subsections is None or self.current_crt_subsection_index is None:
@@ -245,9 +298,9 @@ class FileCrossReferenceTable:
         return entry
 
     def format(self, byte_offset_object_map):
-        output_parts = ['xref']
-        output_parts.extend([subsection.format(byte_offset_object_map) for subsection in self.subsections])
-        return '\n'.join(output_parts)
+        output_lines = ['xref']
+        output_lines.extend([subsection.format(byte_offset_object_map) for subsection in self.subsections])
+        return '\n'.join(output_lines)
 
 
 class CRTSubsection:
@@ -259,9 +312,9 @@ class CRTSubsection:
         if len(self.entries) == 0:
             raise Exception
         first_object_number = self.entries[0].pdf_object.object_number
-        output_parts = [f"{first_object_number} {len(self.entries)}"]
-        output_parts.extend([entry.format(byte_offset_object_map) for entry in self.entries])
-        return '\n'.join(output_parts)
+        output_lines = [f"{first_object_number} {len(self.entries)}\n"]
+        output_lines.extend([entry.format(byte_offset_object_map) for entry in self.entries])
+        return ''.join(output_lines)
 
 
 class CrossReferenceEntry:
@@ -279,32 +332,33 @@ class CrossReferenceEntry:
         else:
             first_item = byte_offset_object_map[(self.pdf_object.object_number, self.pdf_object.generation_number)]
             generation_number = self.pdf_object.generation_number
-        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'}"
+        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'} \n"
 
 
 class FileTrailer:
 
-    def __init__(self, cross_reference_table, document_catalog):
-        self.cross_reference_table = cross_reference_table
-        self.document_catalog = document_catalog
+    def __init__(self, pdf_file):
+        self.pdf_file = pdf_file
 
     def format(self, crt_byte_offset):
-        output_parts = ['trailer']
+        output_lines = ['trailer']
         pdf_dict = {
-            '/Root': self.document_catalog.to_pdf_ref_output(),
-            '/Size': sum(len(s.entries) for s in self.cross_reference_table.subsections)
+            '/Root': self.pdf_file.body.document_catalog.format_ref(),
+            '/Size': sum(len(s.entries) for s in self.pdf_file.cross_reference_table.subsections)
         }
-        output_parts.append(to_pdf_dict_output(pdf_dict))
-        output_parts.append('startxref')
-        output_parts.append(str(crt_byte_offset))
-        output_parts.append('%%EOF')
-        return '\n'.join(output_parts)
+        output_lines.extend([
+            format_type(pdf_dict),
+            'startxref',
+            str(crt_byte_offset),
+            '%%EOF'
+        ])
+        return '\n'.join(output_lines)
 
 
 class DocumentCatalog(PdfObject):
 
-    obj_datatype = dict
-    obj_type = 'Catalog'
+    obj_datatype = 'dictionary'
+    obj_type = '/Catalog'
 
     def __init__(self,
             page_tree,
@@ -319,9 +373,9 @@ class DocumentCatalog(PdfObject):
         super().__init__()
         self.page_tree = page_tree
 
-        self.version = get_optional_entry('version', version)
+        self.version, _ = get_optional_entry('version', version)
         # self.page_label_tree = page_label_tree
-        self.page_layout = get_optional_entry('page_layout', page_layout)
+        self.page_layout, _ = get_optional_entry('page_layout', page_layout)
         # self.page_mode = None
         # self.outline_hierarchy = outline_hierarchy
         # self.article_threads = article_threads
@@ -333,35 +387,38 @@ class DocumentCatalog(PdfObject):
 
     def to_dict(self):
         pdf_dict = {
-            '/Pages': self.page_tree.to_pdf_ref_output()
+            '/Pages': self.page_tree.format_ref()
         }
         return pdf_dict
 
 
 class PageTreeNode(PdfObject):
 
-    obj_datatype = dict
-    obj_type = 'Pages'
+    obj_datatype = 'dictionary'
+    obj_type = '/Pages'
 
-    def __init__(self, kids, count, parent):
+    def __init__(self, pdf_file, parent=None):
         super().__init__()
-        self.kids = kids
-        self.count = count
+        self.pdf_file = pdf_file
         self.parent = parent
+        self.kids = []
+        self.count = 0
 
-        self.resources = {}
+        # inheritable properties
+        self.resources = {'/Font': {}}
+        self.media_box, _ = get_optional_entry('media_box', None)
 
     def to_dict(self):
         pdf_dict = {
-            '/Kids': to_pdf_array_output([k.to_pdf_ref_output() for k in self.kids]),
+            '/Kids': format_type([k.format_ref() for k in self.kids]),
             '/Count': self.count
         }
         if self.parent is not None:
-            pdf_dict['/Parent'] = self.parent.to_pdf_ref_output()
+            pdf_dict['/Parent'] = self.parent.format_ref()
         return pdf_dict
 
     def add_page(self):
-        page = PageObject(self, None, OPTIONS['media_box']['default'])
+        page = PageObject(self.pdf_file, self)
         self.kids.append(page)
         self.count += 1
         return page
@@ -369,27 +426,150 @@ class PageTreeNode(PdfObject):
 
 class PageObject(PdfObject):
 
-    obj_datatype = dict
-    obj_type = 'Page'
+    obj_datatype = 'dictionary'
+    obj_type = '/Page'
 
-    def __init__(self, parent, resources, media_box, contents=None):
+    def __init__(self, pdf_file, parent, resources=None, media_box=None, contents=None):
         super().__init__()
+        self.pdf_file = pdf_file
         self.parent = parent
+
+        self.font_mapping = {}
         self.resources = resources
         self.media_box = media_box
-
-        self.contents = contents
+        self.contents = contents or []
+        self.get_inherited()
 
     def get_inherited(self):
         self.resources = get_inherited_entry('resources', self, required=True)
+        self.media_box = get_inherited_entry('media_box', self, required=True)
+
+    def add_content_stream(self):
+        stream = ContentStream()
+        self.pdf_file.add_pdf_object(stream)
+        self.contents.append(stream)
+        return stream
+
+    def add_text(self, text, font_name=None):
+        font_name, font_settings = get_optional_entry('font', font_name)
+        if font_name not in self.pdf_file.body.fonts:
+            font = Font(font_name, font_settings['sub_type'])
+            self.pdf_file.add_pdf_object(font)
+        else:
+            font = self.pdf_file.body.fonts[font_name]
+        font_number = max(self.font_mapping)+1 if len(self.font_mapping) > 0 else 1
+        self.font_mapping[font_number] = font
+        font_alias_name = f'/F{font_number}'
+        self.resources['/Font'][font_alias_name] = font.format_ref()
+
+        stream = self.add_content_stream()
+        stream.add_content([GraphicsStateTransition().format(TextObject(text, font_alias_name).format())])
+        return stream
 
     def to_dict(self):
-        self.get_inherited()
         pdf_dict = {
-            '/Parent': self.parent.to_pdf_ref_output(),
-            '/Resources': to_pdf_dict_output(self.resources),
-            '/MediaBox': to_pdf_array_output(self.media_box),
+            '/Parent': self.parent.format_ref(),
+            '/Resources': format_type(self.resources),
+            '/MediaBox': format_type(self.media_box),
         }
         if self.contents is not None:
-            pdf_dict['/Contents'] = self.contents.to_pdf_ref_output()
+            pdf_dict['/Contents'] = format_type([content.format_ref() for content in self.contents])
         return pdf_dict
+
+
+class Font(PdfObject):
+
+    obj_datatype = 'dictionary'
+    obj_type = '/Font'
+
+    def __init__(self, font_name, sub_type):
+        super().__init__()
+        self.font_name = font_name
+        self.sub_type = sub_type
+
+    def to_dict(self):
+        pdf_dict = {
+            '/SubType': f"/{self.sub_type}",
+            '/BaseFont': f"/{self.font_name}",
+        }
+        return pdf_dict
+
+
+class ContentStream(PdfObject):
+
+    obj_datatype = 'stream'
+
+    def __init__(self):
+        super().__init__()
+        self.stream_content = []
+
+    def add_content(self, content):
+        self.stream_content.extend(content)
+
+    def to_stream(self):
+        return '\n'.join([content.format() for content in self.stream_content])
+
+
+class GraphicsStateTransition:
+
+    def __init__(self,
+            translate_x=None, translate_y=None,
+            scale_x=None, scale_y=None,
+            skew_angle_x=None, skew_angle_y=None,
+            rotation_angle=None):
+        # transformations should be done in the following order:
+        # Translate, Rotate, Scale or Skew
+        self.scale_x = scale_x or 1
+        self.skew_x = math.tan(skew_angle_x) if skew_angle_x else 0
+        self.skew_y = math.tan(skew_angle_y) if skew_angle_y else 0
+        self.scale_y = scale_y or 1
+        self.translate_x = translate_x or 0
+        self.translate_y = translate_y or 0
+        if rotation_angle is not None:
+            self.scale_x = math.cos(self.scale_x)
+            self.skew_x = math.sin(self.skew_x)
+            self.skew_y = -math.sin(self.skew_y)
+            self.scale_y = math.cos(self.scale_y)
+        self.transformation_matrix = [
+            self.scale_x,
+            self.skew_x,
+            self.skew_y,
+            self.scale_y,
+            self.translate_x,
+            self.translate_y,
+        ]
+
+    def format(self, content_str):
+        output_ops = [
+            'q',
+            f"{' '.join(map(lambda x: str(x), self.transformation_matrix))} cm",
+            content_str,
+            'Q'
+        ]
+        return '\n'.join(output_ops)
+
+
+class TextObject:
+
+    def __init__(self, text, font,
+            size=None, line_size=None,
+            text_transformation_matrix=None, text_color_matrix=None,
+            **kwargs):
+        self.text = text
+        self.font = font
+        self.size = size or 12
+        self.line_size = line_size or 14.4
+        self.text_transformation_matrix = text_transformation_matrix or [1, 0, 0, 1, 0, 0]
+        self.text_color_matrix = text_color_matrix or [0, 0, 0]
+
+    def format(self):
+        output_ops = [
+            'BT ',
+            f"{' '.join(map(lambda x: str(x), self.text_transformation_matrix))} Tm ",
+            f"{self.font} {self.size} Tf ",
+            f"{self.line_size} TL ",
+            f"({self.text}) Tj ",
+            'T* ',
+            'ET'
+        ]
+        return ''.join(output_ops)

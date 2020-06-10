@@ -11,12 +11,12 @@ from pdfalcon.pdf import PdfFile
 
 
 def test_build_pdf_file():
-    pdf = PdfFile.build()
+    pdf = PdfFile()
     page = pdf.add_page()
+    content_stream = page.add_text("basic test")
     print()
     print(pdf.format())
     print()
-    # content = page.add_text("basic test")
 
     # assert pdf.to_pretty_dict() == {'body': {'document_catalog': {'pages': [{'page': {'text': 'basic test'}}]}}}
 
