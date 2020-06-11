@@ -95,7 +95,7 @@ def get_inherited_entry(key, node, required=False):
 
 def format_type(data):
     if isinstance(data, list):
-        return ' '.join(['[', *[format_type(x) for x in data], ']'])
+        return f"[ {' '.join([format_type(x) for x in data])} ]"
     elif isinstance(data, dict):
         output_lines = [
             '<<',
@@ -141,9 +141,11 @@ class PdfObject:
             pdf_dict.update(self.to_dict())
             output_lines.append(format_type(pdf_dict))
         elif self.obj_datatype == 'stream':
+            stream_str = self.to_stream()
             output_lines.extend([
+                format_type({'/Length': len(stream_str)}),
                 'stream',
-                self.to_stream(),
+                stream_str,
                 'endstream'
             ])
 
@@ -462,8 +464,9 @@ class PageObject(PdfObject):
         font_alias_name = f'/F{font_number}'
         self.resources['/Font'][font_alias_name] = font.format_ref()
 
+        text_obj = TextObject(text, font_alias_name)
         stream = self.add_content_stream()
-        stream.add_content([GraphicsStateTransition().format(TextObject(text, font_alias_name).format())])
+        stream.add_content([GraphicsStateTransition(text_obj, translate_x=50, translate_y=100)])
         return stream
 
     def to_dict(self):
@@ -489,7 +492,7 @@ class Font(PdfObject):
 
     def to_dict(self):
         pdf_dict = {
-            '/SubType': f"/{self.sub_type}",
+            '/Subtype': f"/{self.sub_type}",
             '/BaseFont': f"/{self.font_name}",
         }
         return pdf_dict
@@ -512,13 +515,14 @@ class ContentStream(PdfObject):
 
 class GraphicsStateTransition:
 
-    def __init__(self,
+    def __init__(self, *args,
             translate_x=None, translate_y=None,
             scale_x=None, scale_y=None,
             skew_angle_x=None, skew_angle_y=None,
             rotation_angle=None):
         # transformations should be done in the following order:
         # Translate, Rotate, Scale or Skew
+        self.content_objs = args
         self.scale_x = scale_x or 1
         self.skew_x = math.tan(skew_angle_x) if skew_angle_x else 0
         self.skew_y = math.tan(skew_angle_y) if skew_angle_y else 0
@@ -539,14 +543,15 @@ class GraphicsStateTransition:
             self.translate_y,
         ]
 
-    def format(self, content_str):
-        output_ops = [
-            'q',
+    def format(self):
+        output_lines = [
+            "q",
             f"{' '.join(map(lambda x: str(x), self.transformation_matrix))} cm",
-            content_str,
-            'Q'
         ]
-        return '\n'.join(output_ops)
+        if len(self.content_objs) > 0:
+            output_lines.extend([o.format() for o in self.content_objs])
+        output_lines.append("Q")
+        return '\n'.join(output_lines)
 
 
 class TextObject:
@@ -563,13 +568,13 @@ class TextObject:
         self.text_color_matrix = text_color_matrix or [0, 0, 0]
 
     def format(self):
-        output_ops = [
-            'BT ',
-            f"{' '.join(map(lambda x: str(x), self.text_transformation_matrix))} Tm ",
-            f"{self.font} {self.size} Tf ",
-            f"{self.line_size} TL ",
-            f"({self.text}) Tj ",
-            'T* ',
-            'ET'
+        output_lines = [
+            "BT ",
+            f"{' '.join(map(lambda x: str(x), self.text_transformation_matrix))} Tm",
+            f"{self.font} {self.size} Tf",
+            f"{self.line_size} TL",
+            f"({self.text}) Tj",
+            "T*",
+            "ET"
         ]
-        return ''.join(output_ops)
+        return '\n'.join(output_lines)
