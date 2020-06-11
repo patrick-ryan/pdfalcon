@@ -196,7 +196,7 @@ class PdfFile:
         # possibly make linearized the default to optimize web read performance
         if not isinstance(io_buffer, BytesIO):
             raise Exception
-        io_buffer.write()
+        io_buffer.write(self.format().encode('utf-8'))
 
 
 class FileBody:
@@ -446,13 +446,7 @@ class PageObject(PdfObject):
         self.resources = get_inherited_entry('resources', self, required=True)
         self.media_box = get_inherited_entry('media_box', self, required=True)
 
-    def add_content_stream(self):
-        stream = ContentStream()
-        self.pdf_file.add_pdf_object(stream)
-        self.contents.append(stream)
-        return stream
-
-    def add_text(self, text, font_name=None):
+    def add_font(self, font_name):
         font_name, font_settings = get_optional_entry('font', font_name)
         if font_name not in self.pdf_file.body.fonts:
             font = Font(font_name, font_settings['sub_type'])
@@ -463,11 +457,20 @@ class PageObject(PdfObject):
         self.font_mapping[font_number] = font
         font_alias_name = f'/F{font_number}'
         self.resources['/Font'][font_alias_name] = font.format_ref()
+        return font_alias_name
 
-        text_obj = TextObject(text, font_alias_name)
-        stream = self.add_content_stream()
-        stream.add_content([GraphicsStateTransition(text_obj, translate_x=50, translate_y=100)])
+    def add_content_stream(self, content_objs):
+        stream = ContentStream(content_objs)
+        self.pdf_file.add_pdf_object(stream)
+        self.contents.append(stream)
         return stream
+
+    def add_text(self, text, font_name=None, size=None, line_size=None, **kwargs):
+        font_alias_name = self.add_font(font_name)
+        text_obj = TextObject(text, font_alias_name, size=size, line_size=line_size)
+        content_objs = [GraphicsStateTransition([text_obj], **kwargs)]
+        self.add_content_stream(content_objs)
+        return text_obj
 
     def to_dict(self):
         pdf_dict = {
@@ -502,27 +505,23 @@ class ContentStream(PdfObject):
 
     obj_datatype = 'stream'
 
-    def __init__(self):
+    def __init__(self, content_objs):
         super().__init__()
-        self.stream_content = []
-
-    def add_content(self, content):
-        self.stream_content.extend(content)
+        self.content_objs = content_objs
 
     def to_stream(self):
-        return '\n'.join([content.format() for content in self.stream_content])
+        return '\n'.join([o.format() for o in self.content_objs])
 
 
 class GraphicsStateTransition:
+    # TODO: split out into utility functions, e.g. text_obj.translate(x=5, y=10)
 
-    def __init__(self, *args,
+    def __init__(self, content_objs,
             translate_x=None, translate_y=None,
             scale_x=None, scale_y=None,
             skew_angle_x=None, skew_angle_y=None,
             rotation_angle=None):
-        # transformations should be done in the following order:
-        # Translate, Rotate, Scale or Skew
-        self.content_objs = args
+        self.content_objs = content_objs
         self.scale_x = scale_x or 1
         self.skew_x = math.tan(skew_angle_x) if skew_angle_x else 0
         self.skew_y = math.tan(skew_angle_y) if skew_angle_y else 0
@@ -530,10 +529,10 @@ class GraphicsStateTransition:
         self.translate_x = translate_x or 0
         self.translate_y = translate_y or 0
         if rotation_angle is not None:
-            self.scale_x = math.cos(self.scale_x)
-            self.skew_x = math.sin(self.skew_x)
-            self.skew_y = -math.sin(self.skew_y)
-            self.scale_y = math.cos(self.scale_y)
+            self.scale_x = math.cos(rotation_angle)
+            self.skew_x += math.sin(rotation_angle)
+            self.skew_y += -math.sin(rotation_angle)
+            self.scale_y = math.cos(rotation_angle)
         self.transformation_matrix = [
             self.scale_x,
             self.skew_x,
