@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 from io import BytesIO
 
@@ -465,11 +466,21 @@ class PageObject(PdfObject):
         self.contents.append(stream)
         return stream
 
-    def add_text(self, text, font_name=None, size=None, line_size=None, **kwargs):
+    def add_text(self, text, font_name=None, size=None, line_size=None,
+            translate_x=None, translate_y=None, scale_x=None, scale_y=None,
+            skew_angle_a=None, skew_angle_b=None, rotation_angle=None):
         font_alias_name = self.add_font(font_name)
         text_obj = TextObject(text, font_alias_name, size=size, line_size=line_size)
-        content_objs = [GraphicsStateTransition([text_obj], **kwargs)]
-        self.add_content_stream(content_objs)
+        gsm = GraphicsStateMachine([text_obj])
+        if translate_x is not None or translate_y is not None:
+            gsm.add_translation(x=translate_x, y=translate_y)
+        if rotation_angle is not None:
+            gsm.add_rotation(rotation_angle)
+        if scale_x is not None or scale_y is not None:
+            gsm.add_scaling(x=scale_x, y=scale_y)
+        if skew_angle_a is not None or skew_angle_b is not None:
+            gsm.add_skew(angle_a=skew_angle_a, angle_b=skew_angle_b)
+        self.add_content_stream([gsm])
         return text_obj
 
     def to_dict(self):
@@ -513,63 +524,79 @@ class ContentStream(PdfObject):
         return '\n'.join([o.format() for o in self.content_objs])
 
 
-class GraphicsStateTransition:
-    # TODO: split out into utility functions, e.g. text_obj.translate(x=5, y=10)
+class GraphicsStateMachine:
 
-    def __init__(self, content_objs,
-            translate_x=None, translate_y=None,
-            scale_x=None, scale_y=None,
-            skew_angle_x=None, skew_angle_y=None,
-            rotation_angle=None):
+    def __init__(self, content_objs, transformation_matrix=None):
         self.content_objs = content_objs
-        self.scale_x = scale_x or 1
-        self.skew_x = math.tan(skew_angle_x) if skew_angle_x else 0
-        self.skew_y = math.tan(skew_angle_y) if skew_angle_y else 0
-        self.scale_y = scale_y or 1
-        self.translate_x = translate_x or 0
-        self.translate_y = translate_y or 0
-        if rotation_angle is not None:
-            self.scale_x = math.cos(rotation_angle)
-            self.skew_x += math.sin(rotation_angle)
-            self.skew_y += -math.sin(rotation_angle)
-            self.scale_y = math.cos(rotation_angle)
-        self.transformation_matrix = [
-            self.scale_x,
-            self.skew_x,
-            self.skew_y,
-            self.scale_y,
-            self.translate_x,
-            self.translate_y,
-        ]
+        self.transformation_matrix = transformation_matrix or \
+            [[1, 0, 0],
+             [0, 1, 0],
+             [0, 0, 1]]
+
+    def add_translation(self, x=None, y=None):
+        self.transformation_matrix = np.matmul(
+            [[1, 0, 0],
+             [0, 1, 0],
+             [x or 0, y or 0, 1]],
+            self.transformation_matrix)
+
+    def add_scaling(self, x=None, y=None):
+        self.transformation_matrix = np.matmul(
+            [[x or 1, 0, 0],
+             [0, y or 1, 0],
+             [0, 0, 1]],
+            self.transformation_matrix)
+
+    def add_skew(self, angle_a=None, angle_b=None):
+        angle_a_tan = math.tan((angle_a or 0)*math.pi/180)
+        angle_b_tan = math.tan((angle_b or 0)*math.pi/180)
+        self.transformation_matrix = np.matmul(
+            [[1, angle_a_tan, 0],
+             [angle_b_tan, 1, 0],
+             [0, 0, 1]],
+            self.transformation_matrix)
+
+    def add_rotation(self, angle=None):
+        angle_cos = math.cos((angle or 0)*math.pi/180)
+        angle_sin = math.sin((angle or 0)*math.pi/180)
+        self.transformation_matrix = np.matmul(
+            [[angle_cos, angle_sin, 0],
+             [-angle_sin, angle_cos, 0],
+             [0, 0, 1]],
+            self.transformation_matrix)
 
     def format(self):
+        if len(self.content_objs) == 0:
+            raise Exception
+        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
         output_lines = [
             "q",
-            f"{' '.join(map(lambda x: str(x), self.transformation_matrix))} cm",
+            f"{' '.join(map(str, [a, b, c, d, e, f]))} cm",
+            *[o.format() for o in self.content_objs],
+            "Q"
         ]
-        if len(self.content_objs) > 0:
-            output_lines.extend([o.format() for o in self.content_objs])
-        output_lines.append("Q")
         return '\n'.join(output_lines)
 
 
 class TextObject:
 
     def __init__(self, text, font,
-            size=None, line_size=None,
-            text_transformation_matrix=None, text_color_matrix=None,
-            **kwargs):
+            size=None, line_size=None, transformation_matrix=None):
         self.text = text
         self.font = font
         self.size = size or 12
         self.line_size = line_size or 14.4
-        self.text_transformation_matrix = text_transformation_matrix or [1, 0, 0, 1, 0, 0]
-        self.text_color_matrix = text_color_matrix or [0, 0, 0]
+        self.transformation_matrix = transformation_matrix or \
+            [[1, 0, 0],
+             [0, 1, 0],
+             [0, 0, 1]]
+        self.color_matrix = None
 
     def format(self):
+        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
         output_lines = [
             "BT ",
-            f"{' '.join(map(lambda x: str(x), self.text_transformation_matrix))} Tm",
+            f"{' '.join(map(str, [a, b, c, d, e, f]))} Tm",
             f"{self.font} {self.size} Tf",
             f"{self.line_size} TL",
             f"({self.text}) Tj",

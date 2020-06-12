@@ -14,14 +14,14 @@ from pdfalcon.pdf import PdfFile
 def test_build_pdf_file():
     pdf = PdfFile()
     page = pdf.add_page()
-    text_obj = page.add_text("basic test", translate_x=75, translate_y=100, scale_x=5, scale_y=5, skew_angle_x=5, skew_angle_y=5)
+    text_obj = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
     # print()
     # print(pdf.format())
     # print()
 
     io_buffer = io.BytesIO()
     pdf.write(io_buffer)
-    with open('./output/first-text.pdf', 'wb') as f:
+    with open('./output/text.pdf', 'wb') as f:
         f.write(io_buffer.getbuffer())
 
     # assert pdf.to_pretty_dict() == {'body': {'document_catalog': {'pages': [{'page': {'text': 'basic test'}}]}}}
