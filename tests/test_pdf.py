@@ -1,8 +1,9 @@
-import io
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + '/../')
+
+OUTPUT_DIR = './tests/output'
 
 
 from pdfalcon.pdf import PdfFile
@@ -11,18 +12,25 @@ from pdfalcon.pdf import PdfFile
 # use `qpdfview <file>` to open pdf and view logs
 
 
-def test_build_pdf_file():
+def write_to_file(test):
+    def fn(*args, **kwargs):
+        pdf = test(*args, **kwargs)
+
+        with open(f'{OUTPUT_DIR}/{test.__name__}.pdf', 'wb') as f:
+            pdf.write(f)
+    return fn
+
+
+@write_to_file
+def test_write_text():
     pdf = PdfFile()
     page = pdf.add_page()
     text_obj = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
-    # print()
-    # print(pdf.format())
-    # print()
+    return pdf
 
-    io_buffer = io.BytesIO()
-    pdf.write(io_buffer)
-    with open('./output/text.pdf', 'wb') as f:
-        f.write(io_buffer.getbuffer())
 
-    # assert pdf.to_pretty_dict() == {'body': {'document_catalog': {'pages': [{'page': {'text': 'basic test'}}]}}}
+def test_read_text():
+    pdf = PdfFile().read(open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf'))
+    print(pdf.body.objects)
 
+    assert pdf.body.objects == {}
