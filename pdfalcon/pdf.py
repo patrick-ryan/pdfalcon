@@ -224,10 +224,18 @@ class PdfFile:
     def __init__(self, version=None):
         self.version, _ = get_optional_entry('version', version)
 
+        self.header = None
+        self.body = None
+        self.cross_reference_table = None
+        self.trailer = None
+
+    def setup(self):
+        # builds a basic structure
         self.header = FileHeader(self)
-        self.body = FileBody(self)
-        self.cross_reference_table = FileCrossReferenceTable(self)
+        self.body = FileBody(self).setup()
+        self.cross_reference_table = FileCrossReferenceTable(self).setup()
         self.trailer = FileTrailer(self)
+        return self
 
     def add_pdf_object(self, pdf_object):
         pdf_object = self.body.add_pdf_object(pdf_object)
@@ -283,7 +291,7 @@ class PdfFile:
 
 class FileBody:
 
-    def __init__(self, pdf_file, from_empty=True):
+    def __init__(self, pdf_file):
         self.pdf_file = pdf_file
         self.objects = {}
         self.fonts = {}
@@ -293,20 +301,21 @@ class FileBody:
         self.page_tree_root = None
         self.document_catalog = None
 
-        if from_empty is True:
-            # pdf file is being built from scratch, so create the basic objects
+    def setup(self):
+        # pdf file is being built from scratch, so create the basic objects
 
-            # the zeroth object
-            self.zeroth_object = PdfObject()
-            self.add_pdf_object(self.zeroth_object)
-            self.zeroth_object.release(self.zeroth_object)
-            self.free_object_list_tail = self.zeroth_object
+        # the zeroth object
+        self.zeroth_object = PdfObject()
+        self.add_pdf_object(self.zeroth_object)
+        self.zeroth_object.release(self.zeroth_object)
+        self.free_object_list_tail = self.zeroth_object
 
-            # the document catalog object
-            self.page_tree_root = PageTreeNode(self.pdf_file)
-            self.document_catalog = DocumentCatalog(self.page_tree_root)
-            self.add_pdf_object(self.document_catalog)
-            self.add_pdf_object(self.page_tree_root)
+        # the document catalog object
+        self.page_tree_root = PageTreeNode(self.pdf_file)
+        self.document_catalog = DocumentCatalog(self.page_tree_root)
+        self.add_pdf_object(self.document_catalog)
+        self.add_pdf_object(self.page_tree_root)
+        return self
 
     def add_pdf_object(self, pdf_object):
         if pdf_object.attached is True:
@@ -390,18 +399,18 @@ class FileCrossReferenceTable:
 
     starter = 'xref'
 
-    def __init__(self, pdf_file, from_empty=True):
+    def __init__(self, pdf_file):
         self.pdf_file = pdf_file
         self.subsections = None
         self.current_crt_subsection_index = None
 
-        if from_empty is True:
-            # pdf file is being built from scratch, so create the basic objects
-            self.subsections = [CrtSubsection()]
-            self.current_crt_subsection_index = 0
-            self.add_pdf_object(self.pdf_file.body.zeroth_object)
-            self.add_pdf_object(self.pdf_file.body.document_catalog)
-            self.add_pdf_object(self.pdf_file.body.page_tree_root)
+    def setup(self):
+        # pdf file is being built from scratch, so create the basic objects
+        self.subsections = [CrtSubsection()]
+        self.current_crt_subsection_index = 0
+        self.add_pdf_object(self.pdf_file.body.zeroth_object)
+        self.add_pdf_object(self.pdf_file.body.document_catalog)
+        self.add_pdf_object(self.pdf_file.body.page_tree_root)
 
     def add_pdf_object(self, pdf_object):
         subsection = self.subsections[self.current_crt_subsection_index]
@@ -615,8 +624,8 @@ class PageObject(PdfObject):
             translate_x=None, translate_y=None, scale_x=None, scale_y=None,
             skew_angle_a=None, skew_angle_b=None, rotation_angle=None):
         font_alias_name = self.add_font(font_name)
-        text_obj = TextObject(text, font_alias_name, size=size, line_size=line_size)
-        gsm = GraphicsStateMachine([text_obj])
+        text_obj = StreamTextObject(text, font_alias_name, size=size, line_size=line_size)
+        gsm = StreamGraphicsState([text_obj])
         if translate_x is not None or translate_y is not None:
             gsm.add_translation(x=translate_x, y=translate_y)
         if rotation_angle is not None:
@@ -669,7 +678,7 @@ class ContentStream(PdfObject):
         return '\n'.join([o.format() for o in self.content_objs])
 
 
-class GraphicsStateMachine:
+class StreamGraphicsState:
 
     def __init__(self, content_objs, transformation_matrix=None):
         self.content_objs = content_objs
@@ -723,7 +732,7 @@ class GraphicsStateMachine:
         return '\n'.join(output_lines)
 
 
-class TextObject:
+class StreamTextObject:
 
     def __init__(self, text, font,
             size=None, line_size=None, transformation_matrix=None):

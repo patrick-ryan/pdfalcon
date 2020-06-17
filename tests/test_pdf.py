@@ -23,7 +23,7 @@ def write_to_file(test):
 
 @write_to_file
 def test_write_text():
-    pdf = PdfFile()
+    pdf = PdfFile().setup()
     page = pdf.add_page()
     text_obj = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
     return pdf
