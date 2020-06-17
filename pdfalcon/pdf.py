@@ -282,10 +282,10 @@ class PdfFile:
         # TODO: maybe add page numbers kwarg, since the random access pdf structure
         # enables us to load pages independently;
         # also consder adding merging behavior if the file object is already built
-        self.header.parse(io_buffer)
-        xref_offset, num_objects = self.trailer.parse(io_buffer)
-        self.cross_reference_table.parse(io_buffer, xref_offset, num_objects)
-        self.body.parse(io_buffer)
+        self.header = FileHeader(self).parse(io_buffer)
+        self.body, xref_offset, num_objects = FileBody(self).parse(io_buffer)
+        self.cross_reference_table = FileCrossReferenceTable(self).parse(io_buffer, xref_offset, num_objects)
+        self.trailer = FileTrailer(self).parse(io_buffer)
         return self
 
 
@@ -365,7 +365,7 @@ class FileBody:
         return '\n'.join(output_lines), byte_offset_object_map, byte_offset
 
     def parse(self, io_buffer):
-        pass
+        return self
 
 
 class FileHeader:
@@ -393,6 +393,7 @@ class FileHeader:
         if first_line.startswith(self.starter) is False:
             raise Exception
         self.pdf_file.version = first_line[self.starter:]
+        return self
 
 
 class FileCrossReferenceTable:
@@ -437,6 +438,7 @@ class FileCrossReferenceTable:
             subsection.parse(io_buffer)
 
             count += len(subsection.entries)
+        return self
 
 
 class CrtSubsection:
@@ -453,7 +455,7 @@ class CrtSubsection:
         return ''.join(output_lines)
 
     def parse(self, io_buffer):
-        pass
+        return self
 
 
 class CrtEntry:
@@ -474,7 +476,7 @@ class CrtEntry:
         return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'} \n"
 
     def parse(self, io_buffer):
-        pass
+        return self
 
 
 class FileTrailer:
@@ -509,7 +511,10 @@ class FileTrailer:
         if xref_offset is None or startxref is None or startxref.decode() != self.startxref:
             raise Exception
         xref_offset = int(xref_offset)
-        return xref_offset
+
+        # TODO: more stuff, consider making xref_offset and num_objects properties
+
+        return self, xref_offset, num_objects
 
 
 class DocumentCatalog(PdfObject):
