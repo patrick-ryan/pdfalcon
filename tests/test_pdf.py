@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + '/../')
 
 OUTPUT_DIR = './tests/output'
 
+import functools
 
 from pdfalcon.pdf import PdfFile
 
@@ -13,6 +14,7 @@ from pdfalcon.pdf import PdfFile
 
 
 def write_to_file(test):
+    @functools.wraps(test)
     def fn(*args, **kwargs):
         pdf = test(*args, **kwargs)
 
@@ -30,7 +32,5 @@ def test_write_text():
 
 
 def test_read_text():
-    pdf = PdfFile().read(open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf'))
-    print(pdf.body.objects)
-
+    pdf = PdfFile().read(open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf', 'rb'))
     assert pdf.body.objects == {}

@@ -1,12 +1,13 @@
 import io
 import math
 import numpy as np
+import textwrap
 
 
 OPTIONS = {
     'version': {
-        'default': '1.4',
-        'options': {'1.4': {}, '1.5': {}, '1.6': {}, '1.7': {}}
+        'default': 1.4,
+        'options': {1.4: {}, 1.5: {}, 1.6: {}, 1.7: {}}
     },
     'page_layout': {
         'default': 'single_page',
@@ -139,6 +140,8 @@ def parse_type(io_buffer):
     if first_token is None:
         # there must be something there! besides whitespace
         raise PdfParseError
+    elif first_token == b'>':
+        return first_token
     elif first_token == b'<':
         next_token = next(tokens, None)
         if next_token == b'<':
@@ -147,7 +150,7 @@ def parse_type(io_buffer):
             while True:
                 key = parse_type(io_buffer)
                 if key == b'>':
-                    end_token = next(tokens, None)
+                    end_token = next(read_pdf_tokens(io_buffer), None)
                     if end_token != b'>':
                         raise PdfParseError
                     break
@@ -155,12 +158,13 @@ def parse_type(io_buffer):
                 result[key] = value
 
             dict_end_offset = io_buffer.tell()
-            dict_post_token = next(tokens, None)
+            stream_tokens = read_pdf_tokens(io_buffer)
+            dict_post_token = next(stream_tokens, None)
             if dict_post_token == b'stream':
                 # stream type
                 stream_contents = []
                 while True:
-                    stream_token = next(tokens, None)
+                    stream_token = next(stream_tokens, None)
                     if stream_token == b'endstream':
                         break
                     # TODO: parse stream objects, determine if ContentStream,
@@ -184,6 +188,8 @@ def parse_type(io_buffer):
                     # last zero is assumed if odd number of chars
                     hex_string += b'0'
             return PdfHexString(hex_string)
+    elif first_token == b']':
+        return first_token
     elif first_token == b'[':
         # array type
         result = []
@@ -193,12 +199,25 @@ def parse_type(io_buffer):
                 break
             result.append(item)
         return result
+    elif first_token == b'}':
+        return first_token
     elif first_token == b'{':
-        # function expression type
-        pass
+        # TODO: function expression type
+        return None
     elif first_token == b'(':
         # string literal type
-        pass
+        literal_string = b''
+        stack_level = 0
+        while True:
+            next_char = io_buffer.read(1)
+            if next_char == b'(':
+                stack_level += 1
+            elif next_char == b')':
+                if stack_level == 0:
+                    break
+                stack_level -= 1
+            literal_string += next_char
+        return PdfLiteralString(literal_string)
     elif first_token == b'true':
         # boolean type
         return PdfBool(True)
@@ -219,15 +238,28 @@ def parse_type(io_buffer):
         name_end_offset = io_buffer.tell()
         if solidus_end_offset != name_end_offset-len(name):
             # no whitespace allowed between solidus and name
-            raise ParseError
+            raise PdfParseError
         return PdfName(name)
     else:
         try:
+            # numeric type
             first_token = float(first_token)
         except ValueError:
             # unrecognized type
             raise PdfParseError
-        return PdfNumeric(first_token)
+        token_end_offset = io_buffer.tell()
+        next_token = next(tokens, None)
+        try:
+            next_token = float(next_token)
+        except ValueError:
+            io_buffer.seek(token_end_offset, io.SEEK_SET)
+            return PdfNumeric(first_token)
+        final_token = next(tokens, None)
+        if final_token == b'R':
+            return object
+        else:
+            io_buffer.seek(token_end_offset, io.SEEK_SET)
+            return PdfNumeric(first_token)
 
 
 def read_pdf_tokens(io_buffer):
@@ -257,9 +289,9 @@ def read_tokens(io_buffer, whitespace_chars, delimiters, block_size=64):
         for char in block:
             char = b'%c' % char  # convert raw byte to byte str
             if char in delimiters:
+                io_buffer.seek(token_end_offset, io.SEEK_CUR)
                 if cur_token != b'':
                     # end of token
-                    io_buffer.seek(token_end_offset, io.SEEK_CUR)
                     yield cur_token
                 io_buffer.seek(1, io.SEEK_CUR)
                 yield char
@@ -272,7 +304,7 @@ def read_tokens(io_buffer, whitespace_chars, delimiters, block_size=64):
                     yield cur_token
 
                     cur_token = b''
-                    token_end_offset = 0
+                    token_end_offset = 1
                 else:
                     token_end_offset += 1
             else:
@@ -343,10 +375,20 @@ class PdfObject:
 class PdfHexString(PdfObject):
 
     def __init__(self, value):
+        if not isinstance(value, bytes):
+            raise PdfValueError
         try:
             # validate hexadecimal input
             int(value, 16)
         except ValueError:
+            raise PdfValueError
+        self.value = value
+
+
+class PdfLiteralString(PdfObject):
+
+    def __init__(self, value):
+        if not isinstance(value, bytes):
             raise PdfValueError
         self.value = value
 
@@ -372,7 +414,7 @@ class PdfName(PdfObject):
 
     def __init__(self, value):
         # TODO: improve validation to be based on spec
-        if not isinstance(value, str):
+        if not isinstance(value, bytes):
             raise PdfValueError
         self.value = value
 
@@ -528,9 +570,9 @@ class PdfFile:
         self.trailer = FileTrailer(self)
 
         self.header.parse(io_buffer)
-        self.body.parse(io_buffer)
-        self.cross_reference_table.parse(io_buffer)
         self.trailer.parse(io_buffer)
+        self.cross_reference_table.parse(io_buffer)
+        self.body.parse(io_buffer)
         return self
 
 
@@ -624,9 +666,12 @@ class FileBody:
 
 class FileHeader:
 
-    starter = '%PDF-'
-    binary_indicator = '%âãÏÓ'
-    
+    _str = textwrap.dedent('''
+        %PDF-{version}
+        %âãÏÓ
+    ''').strip()
+    _tokens = _str.encode('utf-8').split()
+
     def __init__(self, pdf_file):
         self.pdf_file = pdf_file
 
@@ -634,29 +679,30 @@ class FileHeader:
         self.formatted = None
 
     def format(self):
-        output_lines = [
-            f"{self.starter}{self.pdf_file.version}",
-            self.binary_indicator
-        ]
-        self.formatted = '\n'.join(output_lines)
+        self.formatted = self._str.format(version=self.pdf_file.version)
         return self.formatted
 
     def parse(self, io_buffer):
+        _pdf_version, _ = self._tokens
+        _pdf, _ = _pdf_version.split(b'-')
         io_buffer.seek(0, io.SEEK_SET)
         lines = read_lines(io_buffer)
         first_line = next(lines, None)
         if first_line is None:
             raise Exception
-        first_line = first_line.decode()
-        if first_line.startswith(self.starter) is False:
+        if first_line.startswith(_pdf) is False:
             raise Exception
-        self.pdf_file.version = first_line[self.starter:]
+        self.pdf_file.version = float(first_line[len(_pdf):])
         return self
 
 
 class FileCrossReferenceTable:
 
-    starter = 'xref'
+    _str = textwrap.dedent('''
+        xref
+        {subsections}
+    ''').strip()
+    _tokens = _str.encode('utf-8').split()
 
     def __init__(self, pdf_file):
         self.pdf_file = pdf_file
@@ -679,24 +725,23 @@ class FileCrossReferenceTable:
         return entry
 
     def format(self):
-        output_lines = [self.starter]
-        output_lines.extend([subsection.format() for subsection in self.subsections])
-        return '\n'.join(output_lines)
+        subsections = '\n'.join([subsection.format() for subsection in self.subsections])
+        return self._str.format(subsections=subsections)
 
-    def parse(self, io_buffer, xref_offset, num_objects):
-        io_buffer.seek(xref_offset, io.SEEK_SET)
+    def parse(self, io_buffer):
+        _xref, _ = self._tokens
+        io_buffer.seek(self.pdf_file.trailer.crt_byte_offset, io.SEEK_SET)
         lines = read_lines(io_buffer)
         count = 0
         first_line = next(lines, None)
-        if first_line is None or first_line.decode() != self.starter:
+        if first_line is None or first_line != _xref:
             raise Exception
-        while count < num_objects:
-            subsection = CrtSubsection(self.pdf_file)
-            self.subsections = self.subsections or []
-            self.subsections.append(subsection)
-            subsection.parse(io_buffer)
-
-            count += len(subsection.entries)
+        # self.pdf_file.trailer.trailer_dictionary['/Size']:
+        # while True:
+        #     subsection = CrtSubsection(self.pdf_file)
+        #     self.subsections = self.subsections or []
+        #     self.subsections.append(subsection)
+        #     subsection.parse(io_buffer)
         return self
 
 
@@ -743,15 +788,21 @@ class CrtEntry:
 
 class FileTrailer:
 
-    eof = '%%EOF'
-    startxref = 'startxref'
-    trailer = 'trailer'
+    _str = textwrap.dedent('''
+        trailer
+        {trailer_dictionary}
+        startxref
+        {crt_byte_offset}
+        %%EOF
+    ''').strip()
+    _tokens = _str.encode('utf-8').split()
 
     def __init__(self, pdf_file):
         self.pdf_file = pdf_file
         self.size = 0
 
         # set at parse-time
+        self.crt_byte_offset = None
         self.trailer_dictionary = None
 
     def format(self):
@@ -760,35 +811,30 @@ class FileTrailer:
             '/Root': self.pdf_file.body.document_catalog.format_ref(),
             '/Size': self.size
         }
-        output_lines.extend([
-            format_type(pdf_dict),
-            self.startxref,
-            str(len(self.pdf_file.header.formatted)+len(self.pdf_file.body.formatted)+2),
-            self.eof
-        ])
-        return '\n'.join(output_lines)
+        trailer_dictionary = format_type(pdf_dict)
+        crt_byte_offset = str(len(self.pdf_file.header.formatted.encode())+len(self.pdf_file.body.formatted.encode())+2)
+        return self._str.format(trailer_dictionary=trailer_dictionary, crt_byte_offset=crt_byte_offset)
 
     def parse(self, io_buffer):
+        _trailer, _, _startxref, _, _eof = self._tokens
         io_buffer.seek(0, io.SEEK_END)
         lines = reverse_read_lines(io_buffer)
         last_line = next(lines, None)
-        if last_line is None or last_line.decode() != self.eof:
+        if last_line is None or last_line != _eof:
             raise Exception
-        xref_offset, startxref = next(lines, None), next(lines, None)
-        if xref_offset is None or startxref is None or startxref.decode() != self.startxref:
+        crt_byte_offset, startxref = next(lines, None), next(lines, None)
+        if crt_byte_offset is None or startxref is None or startxref != _startxref:
             raise Exception
-        self.xref_offset = int(xref_offset)
+        self.crt_byte_offset = int(crt_byte_offset)
 
         while True:
             # find start of trailer dictionary
             next_line = next(lines, None)
             if next_line is None:
                 raise Exception
-            next_line = next_line.decode()
-            if next_line == self.trailer:
-                start_offset = io_buffer.tell()
+            if next_line == _trailer:
                 break
-        self.trailer_dictionary = parse_dict(io_buffer, start_offset)
+        self.trailer_dictionary = parse_type(io_buffer)
         return self
 
 
