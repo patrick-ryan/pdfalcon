@@ -32,5 +32,6 @@ def test_write_text():
 
 
 def test_read_text():
-    pdf = PdfFile().read(open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf', 'rb'))
-    assert pdf.body.objects == {}
+    with open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf', 'rb') as f:
+        pdf = PdfFile().read(f)
+    assert len(pdf.sections[0].crt_section.subsections[0].entries) == 6
