@@ -34,4 +34,14 @@ def test_write_text():
 def test_read_text():
     with open(f'{OUTPUT_DIR}/{test_write_text.__name__}.pdf', 'rb') as f:
         pdf = PdfFile().read(f)
-    assert len(pdf.sections[0].crt_section.subsections[0].entries) == 6
+    assert pdf.version == 1.4
+
+    sec = pdf.sections[0]
+    assert len(sec.crt_section.subsections[0].entries) == 6
+    assert sec.trailer.crt_byte_offset == 516
+    assert sec.trailer.trailer_dict['Root'].object_number == 2
+    assert sec.trailer.trailer_dict['Root'].generation_number == 0
+    assert sec.trailer.size.value == 6
+
+    # intentionally missing the zeroth object (bc it's free)
+    assert len(pdf.object_store) == 5
