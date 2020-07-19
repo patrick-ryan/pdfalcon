@@ -382,14 +382,14 @@ class PdfNumeric(PdfObject):
         return str(self.value)
 
 
-class PdfInteger(PdfNumeric, int):
-    
+class PdfInteger(PdfNumeric):
+
     def __init__(self, value=None):
         self.value = int(value or 0)
 
 
-class PdfReal(PdfNumeric, float):
-    
+class PdfReal(PdfNumeric):
+
     def __init__(self, value=None):
         self.value = float(value or 0)
 
@@ -756,15 +756,17 @@ class PdfIndirectObject(PdfObject):
         self.ref = None
         self.contents = None
 
-    def attach(self, body, object_number, generation_number, contents):
+    @property
+    def object_key(self):
+        return (self.object_number, self.generation_number)
+
+    def attach(self, object_number, generation_number, contents):
         # attached means the object has been given identifying information
         self.object_number = object_number
         self.generation_number = generation_number
         self.attached = True
         self.ref = PdfIndirectObjectRef(object_number, generation_number)
         self.contents = contents
-
-        body.objects[(object_number, generation_number)] = self
         return self
 
     def release(self, next_free_object):
@@ -806,6 +808,10 @@ class PdfIndirectObjectRef(PdfObject):
             raise PdfValueError
         self.object_number = object_number
         self.generation_number = generation_number
+
+    @property
+    def object_key(self):
+        return (self.object_number, self.generation_number)
 
     def format(self):
         return self._str.format(
@@ -1037,19 +1043,29 @@ class FileBody:
 
     def setup(self):
         # start with zeroth object
-        self.zeroth_object = PdfIndirectObject()
         object_number, generation_number = 0, 65535
-        self.zeroth_object.attach(self, object_number, generation_number, None)
-        self.zeroth_object.release(self.zeroth_object)
-        self.free_object_list_tail = self.zeroth_object
+        pdf_object = self.make_free_object(object_number, generation_number)
         return self
+
+    def make_free_object(self, object_number, generation_number):
+        pdf_object = PdfIndirectObject()
+        if self.zeroth_object is None:
+            if (object_number, generation_number) != (0, 65535):
+                raise PdfBuildError
+            self.zeroth_object = pdf_object
+            self.free_object_list_tail = pdf_object
+        pdf_object.attach(object_number, generation_number, None)
+        self.objects[(object_number, generation_number)] = pdf_object
+        self.release_pdf_object(pdf_object)
+        return pdf_object
 
     def add_pdf_object(self, contents):
         pdf_object = PdfIndirectObject()
         max_object_number, _ = sorted(self.objects)[-1]
         object_number = max_object_number + 1
         generation_number = 0
-        pdf_object.attach(self, object_number, generation_number, contents)
+        pdf_object.attach(object_number, generation_number, contents)
+        self.objects[(object_number, generation_number)] = pdf_object
         return pdf_object
 
     def release_pdf_object(self, pdf_object):
@@ -1069,7 +1085,7 @@ class FileBody:
             pdf_object = self.objects[k]
             if pdf_object.attached is True and pdf_object.object_number != 0:
                 formatted_object = pdf_object.format()
-                object_byte_offset_map[(pdf_object.object_number, pdf_object.generation_number)] = byte_offset
+                object_byte_offset_map[pdf_object.object_key] = byte_offset
                 byte_offset += len(formatted_object)+1
                 output_lines.append(formatted_object)
         self.object_byte_offset_map = object_byte_offset_map
@@ -1079,13 +1095,15 @@ class FileBody:
         # parse objects supplied by cross-reference table
         for subsection in self.pdf_section.crt_section.subsections:
             for entry in subsection.entries:
-                if entry.free is True:
-                    continue
                 entry_key = (entry.object_number, entry.generation_number)
-                io_buffer.seek(entry.first_item, io.SEEK_SET)
-                entry.pdf_object = PdfIndirectObject().parse(io_buffer)
-                if entry_key not in self.pdf_section.pdf_file.object_store:
-                    self.pdf_section.pdf_file.object_store[entry_key] = entry.pdf_object
+                if entry.free is True:
+                    entry.pdf_object = self.make_free_object(*entry_key)
+                else:
+                    io_buffer.seek(entry.first_item, io.SEEK_SET)
+                    entry.pdf_object = PdfIndirectObject().parse(io_buffer)
+                    if entry_key not in self.pdf_section.pdf_file.object_store:
+                        self.pdf_section.pdf_file.object_store[entry_key] = entry.pdf_object
+                    self.objects[entry_key] = entry.pdf_object
         return self
 
 
@@ -1303,6 +1321,7 @@ class DocumentCatalog:
         return self
 
     def from_object(self, pdf_object):
+        self.pdf_object = pdf_object
         page_tree_ref = pdf_object.contents['Pages']
         object_key = (page_tree_ref.object_number, page_tree_ref.generation_number)
         if object_key not in self.pdf_file.object_store:
@@ -1342,6 +1361,7 @@ class PageTreeNode:
         return self
 
     def from_object(self, pdf_object):
+        self.pdf_object = pdf_object
         self.resources = pdf_object.contents.get('Resources')
         self.kids = pdf_object.contents['Kids']
         for kid_ref in pdf_object.contents['Kids']:
@@ -1371,6 +1391,7 @@ class PageObject:
     def __init__(self, pdf_file, parent):
         self.pdf_file = pdf_file
         self.parent = parent
+        self.objects = []
 
         self.pdf_object = None
 
@@ -1394,11 +1415,17 @@ class PageObject:
         return self
 
     def from_object(self, pdf_object):
+        self.pdf_object = pdf_object
         self.resources = pdf_object.contents.get('Resources')
         self.resources = get_inherited_entry('resources', self, required=True)
         self.media_box = pdf_object.contents.get('MediaBox')
         self.media_box = get_inherited_entry('media_box', self, required=True)
         self.contents = pdf_object.contents.get('Contents', PdfArray())
+        for content_ref in self.contents:
+            if content_ref.object_key not in self.pdf_file.object_store:
+                raise PdfParseError
+            content_object = self.pdf_file.object_store[content_ref.object_key]
+            self.objects.append(ContentStream(self.pdf_file).from_object(content_object))
         max_font_number = 0
         for font_alias_name in self.resources.get('Font', {}):
             font_number = int(font_alias_name[1:])
@@ -1421,10 +1448,11 @@ class PageObject:
         return font_alias_name
 
     def add_content_stream(self, contents):
-        stream = ContentStream(self.pdf_file, contents).setup()
+        stream = ContentStream(self.pdf_file, contents=contents).setup()
         if 'Contents' not in self.pdf_object.contents:
             self.pdf_object.contents[PdfName('Contents')] = self.contents
         self.contents.append(stream.pdf_object.ref)
+        self.objects.append(stream)
         return stream
 
     def add_text(self, text, font_name=None, size=None, line_size=None,
@@ -1478,11 +1506,17 @@ class Font:
 
 class ContentStream:
 
-    def __init__(self, pdf_file, contents):
+    def __init__(self, pdf_file, contents=None):
         self.pdf_file = pdf_file
         self.contents = contents
 
         self.pdf_object = None
+
+    def from_object(self, pdf_object):
+        self.pdf_object = pdf_object
+        stream = pdf_object.contents
+        self.contents = stream.contents
+        return self
 
     def setup(self):
         self.pdf_object, _ = self.pdf_file.add_pdf_object(
