@@ -1,13 +1,22 @@
+# TODO: for file setup/reading, maybe find better way to serialize the objects,
+#   so that it's just a deep comparison of dicts;
+#   add more parser (and maybe formatter) unit tests
+
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + '/../')
 
 OUTPUT_DIR = './tests/output'
+if not os.path.exists(OUTPUT_DIR):
+    os.mkdir(OUTPUT_DIR)
 
+import io
 import functools
+import textwrap
 
-from pdfalcon.pdf import PdfFile, DocumentCatalog, PageTreeNode, PageObject, ContentStream, StreamTextObject, parse_pdf_object
+from pdfalcon.pdf import PdfFile, DocumentCatalog, PageTreeNode, PageObject, ContentStream, \
+    parse_pdf_object, StreamTextObject, PdfIndirectObject, PdfDict, PdfLiteralString, PdfStream, PdfInteger
 
 
 # use `qpdfview <file>` to open pdf and view logs
@@ -58,6 +67,7 @@ def test_write_text():
     assert isinstance(page, PageObject)
     assert len(pdf.document_catalog.page_tree.kids) == 1
     assert pdf.document_catalog.page_tree.count.value == 1
+    assert len(pdf.document_catalog.page_tree.children) == 1
     assert pdf.document_catalog.page_tree.children[0] == page
     assert len(sec.crt_section.subsections[0].entries) == 4
     assert sec.trailer.size.value == 4
@@ -72,19 +82,58 @@ def test_write_text():
     assert len(sec.crt_section.subsections[0].entries) == 6
     assert sec.trailer.size.value == 6
     assert len(sec.body.objects) == 6
+
     return pdf
 
 
 @read_from_file(test_write_text)
 def test_read_text(pdf=None):
     assert pdf.version == 1.4
-
     sec = pdf.sections[0]
     assert len(sec.crt_section.subsections[0].entries) == 6
-    assert sec.trailer.crt_byte_offset == 516
+    assert sec.trailer.crt_byte_offset is not None
     assert sec.trailer.trailer_dict['Root'].object_number == 2
     assert sec.trailer.trailer_dict['Root'].generation_number == 0
     assert sec.trailer.size.value == 6
     # intentionally missing the zeroth object (bc it's free)
     assert len(pdf.object_store) == 5
+    assert isinstance(pdf.document_catalog, DocumentCatalog)
+    assert isinstance(pdf.document_catalog.page_tree, PageTreeNode)
+    assert len(pdf.document_catalog.page_tree.kids) == 1
+    assert pdf.document_catalog.page_tree.count.value == 1
+    assert len(pdf.document_catalog.page_tree.children) == 1
+    assert sec.body.zeroth_object.object_key == (0, 65535)
+    assert sec.body.free_object_list_tail is not None
+    assert isinstance(pdf.document_catalog.page_tree.children[0], PageObject)
+    assert isinstance(pdf.document_catalog.page_tree.children[0].objects[0], ContentStream)
+    assert len(pdf.document_catalog.page_tree.children[0].objects[0].contents) == 4
+    assert isinstance(pdf.document_catalog.page_tree.children[0].objects[0].contents[2], StreamTextObject)
+    assert len(pdf.document_catalog.page_tree.children[0].objects[0].contents[2].contents) == 5
+    assert len(sec.body.objects) == 6
 
+
+def test_parse_indirect_object():
+    io_buffer = io.BytesIO(
+        textwrap.dedent('''
+            1 0 obj
+              42
+            endobj
+        ''').strip().encode('utf-8')
+    )
+    pdf_object = PdfIndirectObject().parse(io_buffer)
+    assert isinstance(pdf_object.contents, PdfInteger)
+    assert pdf_object.contents.value == 42
+
+
+def test_parse_stream():
+    io_buffer = io.BytesIO(
+        textwrap.dedent('''
+            <<
+              /Length 3
+            >>
+            stream
+              q
+            endstream
+        ''').strip().encode('utf-8')
+    )
+    assert isinstance(parse_pdf_object(io_buffer), PdfStream)

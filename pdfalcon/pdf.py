@@ -414,13 +414,14 @@ class PdfDict(PdfObject, dict):
 
     _str = textwrap.dedent('''
         <<
-          {contents}
+        {contents}
         >>
     ''').strip()
 
     def format(self):
         fmt = lambda x: x.format() if isinstance(x, PdfObject) else str(x)
         contents = '\n'.join([f"{fmt(k)} {fmt(v)}" for k,v in self.items()])
+        contents = textwrap.indent(contents, '  ')
         return self._str.format(contents=contents)
 
     def parse(self, io_buffer):
@@ -654,7 +655,7 @@ class StreamTextObject(GraphicsObject):
     def format(self):
         output_lines = [
             "BT ",
-            *[c.format() for c in self.contents],
+            *[textwrap.indent(c.format(), '  ') for c in self.contents],
             "ET"
         ]
         return '\n'.join(output_lines)
@@ -714,12 +715,15 @@ class StreamTextObject(GraphicsObject):
 
 class PdfArray(PdfObject, list):
 
-    _str = '[ {contents} ]'
-
     def format(self):
-        fmt = lambda x: x.format() if isinstance(x, PdfObject) else str(x)
-        contents = ' '.join(map(fmt, self))
-        return self._str.format(contents=contents)
+        fmt = lambda x: x.format()
+        contents = map(fmt, self)
+        if len(self) == 1:
+            contents = ' '.join(contents)
+            return f"[ {contents} ]"
+        else:
+            contents = textwrap.indent('\n'.join(contents), '  ')
+            return f"[\n{contents}\n]"
 
 
 class PdfName(PdfObject, str):
@@ -776,10 +780,13 @@ class PdfIndirectObject(PdfObject):
     def format(self):
         if self.attached is False:
             raise PdfFormatError
+        contents = self.contents.format()
+        if not isinstance(self.contents, PdfStream):
+            contents = textwrap.indent(contents, '  ')
         return self._str.format(
             object_number=self.object_number,
             generation_number=self.generation_number,
-            contents=self.contents.format()
+            contents=contents
         )
 
     def parse(self, io_buffer):
@@ -829,7 +836,8 @@ class PdfFile:
     """
 
     def __init__(self, version=None):
-        self.version, _ = get_optional_entry('version', version)
+        version, _ = get_optional_entry('version', version)
+        self.version = PdfReal(version)
 
         # pdf file structure
         self.header = None
@@ -863,15 +871,16 @@ class PdfFile:
 
         output_lines = []
         formatted_header = self.header.format()
-        self.cur_format_byte_offset = len(formatted_header.encode())+1
+        self.cur_format_byte_offset = len(formatted_header.encode())+2
         output_lines.append(formatted_header)
 
         for section in self.sections:
             formatted_section = section.format()
-            self.cur_format_byte_offset += 1
+            self.cur_format_byte_offset += 2
             output_lines.append(formatted_section)
+        self.cur_format_byte_offset -= 2
 
-        return '\n'.join(output_lines)
+        return '\n\n'.join(output_lines)
 
     def parse(self, io_buffer):
         # create pdf file and document structures from pdf syntax
@@ -945,7 +954,7 @@ class FileHeader:
         self.pdf_file = pdf_file
 
     def format(self):
-        return self._str.format(version=self.pdf_file.version)
+        return self._str.format(version=self.pdf_file.version.format())
 
     def parse(self, io_buffer):
         _pdf_version, _ = self._tokens
@@ -981,16 +990,16 @@ class FileSection:
 
     def format(self):
         formatted_body = self.body.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_body)+1
+        self.pdf_file.cur_format_byte_offset += len(formatted_body)+2
         self.trailer.crt_byte_offset = self.pdf_file.cur_format_byte_offset
 
         formatted_crt_section = self.crt_section.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_crt_section)+1
+        self.pdf_file.cur_format_byte_offset += len(formatted_crt_section)+2
 
         formatted_trailer = self.trailer.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_trailer)+1
+        self.pdf_file.cur_format_byte_offset += len(formatted_trailer)
 
-        return '\n'.join([formatted_body, formatted_crt_section, formatted_trailer])
+        return '\n\n'.join([formatted_body, formatted_crt_section, formatted_trailer])
 
     def parse(self, io_buffer):
         self.body = FileBody(self)
@@ -1086,10 +1095,11 @@ class FileBody:
             if pdf_object.attached is True and pdf_object.object_number != 0:
                 formatted_object = pdf_object.format()
                 object_byte_offset_map[pdf_object.object_key] = byte_offset
-                byte_offset += len(formatted_object)+1
+                byte_offset += len(formatted_object)+2
                 output_lines.append(formatted_object)
+        byte_offset -= 2
         self.object_byte_offset_map = object_byte_offset_map
-        return '\n'.join(output_lines)
+        return '\n\n'.join(output_lines)
 
     def parse(self, io_buffer):
         # parse objects supplied by cross-reference table
@@ -1166,9 +1176,9 @@ class CrtSubsection:
         if len(self.entries) == 0:
             raise PdfFormatError
         first_object_number = self.entries[0].pdf_object.object_number
-        output_lines = [f"{first_object_number} {len(self.entries)}\n"]
+        output_lines = [f"{first_object_number} {len(self.entries)}"]
         output_lines.extend([entry.format() for entry in self.entries])
-        return ''.join(output_lines)
+        return '\n'.join(output_lines)
 
     def parse(self, io_buffer):
         lines = read_lines(io_buffer)
@@ -1210,7 +1220,7 @@ class CrtEntry:
             object_key = (self.pdf_object.object_number, self.pdf_object.generation_number)
             first_item = self.pdf_section.body.object_byte_offset_map[object_key]
             generation_number = self.pdf_object.generation_number
-        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'} \n"
+        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'} "
 
     def parse(self, io_buffer):
         line = next(read_lines(io_buffer), None)
@@ -1350,7 +1360,7 @@ class PageTreeNode:
     def setup(self):
         self.resources = PdfDict({PdfName('Font'): PdfDict()})
         media_box, _ = get_optional_entry('media_box', None)
-        self.media_box = PdfArray(media_box)
+        self.media_box = PdfArray(map(PdfInteger, media_box))
         self.pdf_object, _ = self.pdf_file.add_pdf_object(
             PdfDict({
                 PdfName('Type'):  PdfName('Pages'),
