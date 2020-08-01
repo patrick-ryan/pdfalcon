@@ -15,8 +15,12 @@ import io
 import functools
 import textwrap
 
-from pdfalcon.pdf import PdfFile, DocumentCatalog, PageTreeNode, PageObject, ContentStream, \
-    parse_pdf_object, StreamTextObject, PdfIndirectObject, PdfDict, PdfLiteralString, PdfStream, PdfInteger
+from pdfalcon.pdf import PdfFile, DocumentCatalog, PageTreeNode, PageObject, ContentStream
+from pdfalcon.types import parse_pdf_object, \
+    PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfLiteralString, PdfName, PdfReal, PdfStream, \
+    ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
+    TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation
+from pdfalcon.utils import get_inherited_entry, get_optional_entry, read_lines, read_pdf_tokens, reverse_read_lines
 
 
 # use `qpdfview <file>` to open pdf and view logs
@@ -125,6 +129,20 @@ def test_parse_indirect_object():
     assert pdf_object.contents.value == 42
 
 
+def test_parse_dict():
+    io_buffer = io.BytesIO(
+        textwrap.dedent('''
+            <<
+              /Test 42
+              /Foo /Bar
+            >>
+        ''').strip().encode('utf-8')
+    )
+    dict_ = parse_pdf_object(io_buffer)
+    assert isinstance(dict_, PdfDict)
+    assert dict_ == {'Test': 42, 'Foo': 'Bar'}
+
+
 def test_parse_stream():
     io_buffer = io.BytesIO(
         textwrap.dedent('''
@@ -136,4 +154,17 @@ def test_parse_stream():
             endstream
         ''').strip().encode('utf-8')
     )
-    assert isinstance(parse_pdf_object(io_buffer), PdfStream)
+    stream = parse_pdf_object(io_buffer)
+    assert isinstance(stream, PdfStream)
+    assert stream == PdfStream(stream_dict={'Length': 3}, contents=[StateSaveOperation()])
+
+
+def test_parse_literal_string():
+    io_buffer = io.BytesIO(
+        textwrap.dedent('''
+            (test literal string)
+        ''').strip().encode('utf-8')
+    )
+    str_ = parse_pdf_object(io_buffer)
+    assert isinstance(str_, PdfLiteralString)
+    assert str_ == 'test literal string'
