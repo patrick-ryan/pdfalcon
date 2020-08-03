@@ -14,6 +14,9 @@ class PdfFile:
      1. provide an abstract representation of a pdf file as defined by the PDF spec
         (therefore effectively representing an abstract syntax tree)
      2. provide an interface for manipulating pdf files
+
+    a consideration for the future would be to make interface mixin classes to extend
+        from, if not just to modularize high-level / client functionality
     """
 
     def __init__(self, version=None):
@@ -85,7 +88,7 @@ class PdfFile:
     def add_update(self):
         if len(self.sections) == 0:
             raise PdfBuildError
-        file_update = FileSection(self)
+        file_update = FileSection(self).setup()
         self.sections.append(file_update)
         return file_update
 
@@ -121,6 +124,23 @@ class PdfFile:
         if not io_buffer.seekable():
             raise PdfIoError
         return self.parse(io_buffer)
+
+    def merge(self, pdf):
+        self.add_update()
+        self.version = max(self.version, pdf.version)
+        target_pages = self.document_catalog.pages
+        for i, page in enumerate(pdf.document_catalog.pages):
+            if i == len(target_pages):
+                target_page = self.add_page()
+            else:
+                target_page = target_pages[i]
+            for content_stream in page.objects:
+                new_contents = [c.clone() for c in content_stream.contents]
+                target_page.add_content_stream(new_contents)
+        return self
+
+    def clone(self):
+        return self.__class__().setup().merge(self)
 
 
 class FileHeader:
@@ -498,6 +518,10 @@ class DocumentCatalog:
         # self.named_destinations = named_destinations
         # self.interactive_form = interactive_form
 
+    @property
+    def pages(self):
+        return self.page_tree.get_pages()
+
     def __repr__(self):
         return f'{self.__class__.__name__}({self.page_tree}, version={self.version}, page_layout={self.page_layout})'
 
@@ -550,6 +574,15 @@ class PageTreeNode:
             })
         )
         return self
+
+    def get_pages(self):
+        pages = []
+        for child in self.children:
+            if isinstance(child, PageObject):
+                pages.append(child)
+            else:
+                pages.extend(child.get_pages())
+        return pages
 
     def from_object(self, pdf_object):
         self.pdf_object = pdf_object

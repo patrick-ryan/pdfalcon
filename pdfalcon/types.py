@@ -203,7 +203,7 @@ def parse_stream_object(io_buffer, _op_args=None):
         return parse_stream_object(io_buffer, _op_args=_op_args)
 
 
-class PdfObject(abc.ABC):
+class BaseObject(abc.ABC):
 
     def __eq__(self, obj):
         return type(obj) == type(self) and vars(obj) == vars(self)
@@ -211,6 +211,29 @@ class PdfObject(abc.ABC):
     @abc.abstractmethod
     def format(self):
         pass
+
+    def clone(self):
+        new_obj = self.__class__()
+        for k,v in vars(self):
+            if isinstance(v, list):
+                setattr(new_obj, k, [x.clone() for x in v])
+            elif isinstance(v, dict):
+                setattr(new_obj, k, {k_.clone(): v_.clone() for k_, v_ in v})
+            else:
+                setattr(new_obj, k, v)
+        return new_obj
+
+
+class PdfObject(BaseObject):
+    pass
+
+
+class GraphicsObject(BaseObject):
+    pass
+
+
+class GraphicsOperation(BaseObject):
+    pass
 
 
 class PdfBoolean(PdfObject):
@@ -466,26 +489,6 @@ class PdfStream(PdfObject):
                 break
             self.contents.append(parsed_object)
         return self
-
-
-class GraphicsObject(abc.ABC):
-
-    def __eq__(self, obj):
-        return type(obj) == type(self) and vars(obj) == vars(self)
-
-    @abc.abstractmethod
-    def format(self):
-        pass
-
-
-class GraphicsOperation(abc.ABC):
-
-    def __eq__(self, obj):
-        return type(obj) == type(self) and vars(obj) == vars(self)
-
-    @abc.abstractmethod
-    def format(self):
-        pass
 
 
 class StateSaveOperation(GraphicsOperation):
