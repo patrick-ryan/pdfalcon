@@ -199,8 +199,9 @@ def parse_stream_object(io_buffer, _op_args=None):
     else:
         # must be an instruction arg
         io_buffer.seek(start_offset, io.SEEK_SET)
-        _op_args.append(parse_pdf_object(io_buffer))
+        _op_args.append(parse_pdf_object(io_buffer).value)
         return parse_stream_object(io_buffer, _op_args=_op_args)
+
 
 
 class BaseObject(abc.ABC):
@@ -212,15 +213,21 @@ class BaseObject(abc.ABC):
     def format(self):
         pass
 
+    @classmethod
+    def _clone_obj(cls, obj):
+        if isinstance(obj, list):
+            return [cls._clone_obj(x) for x in obj]
+        elif isinstance(obj, dict):
+            return {cls._clone_obj(k): cls._clone_obj(v) for k,v in obj.items()}
+        elif hasattr(obj, 'clone'):
+            return obj.clone()
+        else:
+            return obj
+
     def clone(self):
         new_obj = self.__class__()
-        for k,v in vars(self):
-            if isinstance(v, list):
-                setattr(new_obj, k, [x.clone() for x in v])
-            elif isinstance(v, dict):
-                setattr(new_obj, k, {k_.clone(): v_.clone() for k_, v_ in v})
-            else:
-                setattr(new_obj, k, v)
+        for k,v in vars(self).items():
+            setattr(new_obj, k, self._clone_obj(v))
         return new_obj
 
 
@@ -254,6 +261,9 @@ class PdfNull(PdfObject):
 
 
 class PdfNumeric(numbers.Real, PdfObject):
+
+    def __repr__(self):
+        return self.value.__repr__()
 
     def __eq__(self, other):
         return self.value.__eq__(other)
@@ -546,7 +556,6 @@ class ConcatenateMatrixOperation(GraphicsOperation):
     def format(self):
         [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
         return f"{a} {b} {c} {d} {e} {f} cm"
-        return f"{self.font_alias_name.format()} {self.size} Tf"
 
 
 class LineWidthOperation(GraphicsOperation):
@@ -666,7 +675,7 @@ class TextShowOperation(GraphicsOperation):
         self.text = text
 
     def format(self):
-        return f"({self.text}) Tj"
+        return f"{self.text.format()} Tj"
 
 
 class TextCharSpaceOperation(GraphicsOperation):
@@ -869,17 +878,19 @@ class PdfIndirectObject(PdfObject):
         self.next_free_object = None
         self.ref = None
         self.contents = None
+        self.pdf_section = None
 
     @property
     def object_key(self):
         return (self.object_number, self.generation_number)
 
-    def attach(self, object_number, generation_number, contents):
+    def attach(self, object_number, generation_number, pdf_section, contents):
         # attached means the object has been given identifying information
         self.object_number = object_number
         self.generation_number = generation_number
         self.attached = True
         self.ref = PdfIndirectObjectRef(object_number, generation_number)
+        self.pdf_section = pdf_section
         self.contents = contents
         return self
 
@@ -907,6 +918,8 @@ class PdfIndirectObject(PdfObject):
         line_parts = line.split()
         if len(line_parts) != 3 or line_parts[2] != b'obj':
             raise PdfParseError
+        self.object_number = line_parts[0]
+        self.generation_number = line_parts[1]
         self.contents = parse_pdf_object(io_buffer)
         final_token = next(read_pdf_tokens(io_buffer), None)
         if final_token != _endobj:

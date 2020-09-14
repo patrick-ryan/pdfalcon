@@ -13,6 +13,7 @@ if not os.path.exists(OUTPUT_DIR):
 
 import io
 import functools
+import pytest
 import textwrap
 
 from pdfalcon.pdf import PdfFile, DocumentCatalog, PageTreeNode, PageObject, ContentStream
@@ -47,6 +48,7 @@ def read_from_file(write_fn):
     return param_fn
 
 
+@pytest.mark.dependency()
 @write_to_file
 def test_write_text():
     pdf = PdfFile()
@@ -58,8 +60,8 @@ def test_write_text():
     sec = pdf.sections[0]
     assert isinstance(pdf.document_catalog, DocumentCatalog)
     assert isinstance(pdf.document_catalog.page_tree, PageTreeNode)
-    assert len(pdf.document_catalog.page_tree.kids) == 0
-    assert pdf.document_catalog.page_tree.count.value == 0
+    assert len(pdf.document_catalog.page_tree.pdf_object.contents['Kids']) == 0
+    assert pdf.document_catalog.page_tree.pdf_object.contents['Count'] == 0
     assert len(pdf.document_catalog.page_tree.children) == 0
     assert sec.body.zeroth_object.object_key == (0, 65535)
     assert sec.body.free_object_list_tail is not None
@@ -69,8 +71,8 @@ def test_write_text():
 
     page = pdf.add_page()
     assert isinstance(page, PageObject)
-    assert len(pdf.document_catalog.page_tree.kids) == 1
-    assert pdf.document_catalog.page_tree.count.value == 1
+    assert len(pdf.document_catalog.page_tree.pdf_object.contents['Kids']) == 1
+    assert pdf.document_catalog.page_tree.pdf_object.contents['Count'] == 1
     assert len(pdf.document_catalog.page_tree.children) == 1
     assert pdf.document_catalog.page_tree.children[0] == page
     assert len(sec.crt_section.subsections[0].entries) == 4
@@ -90,6 +92,7 @@ def test_write_text():
     return pdf
 
 
+@pytest.mark.dependency(depends=["test_write_text"])
 @read_from_file(test_write_text)
 def test_read_text(pdf=None):
     assert pdf.version == 1.4
@@ -103,8 +106,8 @@ def test_read_text(pdf=None):
     assert len(pdf.object_store) == 5
     assert isinstance(pdf.document_catalog, DocumentCatalog)
     assert isinstance(pdf.document_catalog.page_tree, PageTreeNode)
-    assert len(pdf.document_catalog.page_tree.kids) == 1
-    assert pdf.document_catalog.page_tree.count.value == 1
+    assert len(pdf.document_catalog.page_tree.pdf_object.contents['Kids']) == 1
+    assert pdf.document_catalog.page_tree.pdf_object.contents['Count'] == 1
     assert len(pdf.document_catalog.page_tree.children) == 1
     assert sec.body.zeroth_object.object_key == (0, 65535)
     assert sec.body.free_object_list_tail is not None
@@ -168,3 +171,35 @@ def test_parse_literal_string():
     str_ = parse_pdf_object(io_buffer)
     assert isinstance(str_, PdfLiteralString)
     assert str_ == 'test literal string'
+
+
+@pytest.mark.dependency(depends=["test_write_text"])
+@read_from_file(test_write_text)
+@write_to_file
+def test_clone(pdf=None):
+    new_pdf = pdf.clone()
+
+    assert new_pdf is not pdf
+
+    sec = new_pdf.sections[0]
+    assert isinstance(new_pdf.document_catalog, DocumentCatalog)
+    assert isinstance(new_pdf.document_catalog.page_tree, PageTreeNode)
+    assert len(new_pdf.document_catalog.page_tree.pdf_object.contents['Kids']) == 1
+    assert new_pdf.document_catalog.page_tree.pdf_object.contents['Count'] == 1
+    assert len(new_pdf.document_catalog.page_tree.children) == 1
+    assert sec.body.zeroth_object.object_key == (0, 65535)
+    assert sec.body.free_object_list_tail is not None
+    assert len(sec.crt_section.subsections[0].entries) == 3
+    assert sec.trailer.size.value == 3
+    assert len(sec.body.objects) == 3
+
+    sec2 = new_pdf.sections[1]
+    assert isinstance(new_pdf.document_catalog.page_tree.children[0].objects[0], ContentStream)
+    assert len(new_pdf.document_catalog.page_tree.children[0].objects[0].contents) == 4
+    assert len(sec2.crt_section.subsections[0].entries) == 2
+    assert sec2.trailer.size.value == 5
+    assert len(sec2.body.objects) == 5
+
+    assert (set(sec.body.objects) & set(sec2.body.objects)) == {(0,65535), (1,0)}
+
+    return new_pdf

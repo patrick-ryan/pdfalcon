@@ -2,7 +2,7 @@ import io
 import textwrap
 
 from pdfalcon.exceptions import PdfIoError, PdfBuildError, PdfFormatError, PdfParseError
-from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, \
+from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, PdfLiteralString, \
     ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
     TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation
 from pdfalcon.utils import get_inherited_entry, get_optional_entry, read_lines, read_pdf_tokens, reverse_read_lines
@@ -33,11 +33,15 @@ class PdfFile:
         self.document_catalog = None
         self.fonts = {}
 
+        # all in-use objects
+        self.object_store = {}
+
         # set at format-time
         self.cur_format_byte_offset = None
 
-        # set at parse-time
-        self.object_store = {}
+    @property
+    def pages(self):
+        return self.document_catalog.page_tree.get_pages()
 
     def setup(self):
         # builds a basic structure
@@ -93,7 +97,33 @@ class PdfFile:
         return file_update
 
     def add_pdf_object(self, contents):
-        return self.sections[-1].add_pdf_object(contents)
+        pdf_object = PdfIndirectObject()
+        max_object_number, _ = sorted(self.object_store)[-1] if len(self.object_store) > 0 else (0, None)
+        object_number = max_object_number + 1
+        generation_number = 0
+        section_number = len(self.sections)-1
+        pdf_section = self.sections[section_number]
+        pdf_object.attach(object_number, generation_number, pdf_section, contents)
+        self.object_store[pdf_object.object_key] = pdf_object
+        return pdf_section.add_pdf_object(pdf_object)
+
+    def update_pdf_object(self, pdf_object, new_contents):
+        section_number = len(self.sections)-1
+        pdf_section = self.sections[section_number]
+        if pdf_object.pdf_section is pdf_section:
+            raise PdfBuildError
+        new_pdf_object = PdfIndirectObject()
+        new_pdf_object.attach(*pdf_object.object_key, pdf_section, new_contents)
+        self.object_store[new_pdf_object.object_key] = new_pdf_object
+        return pdf_section.add_pdf_object(new_pdf_object)
+
+    def release_pdf_object(self, pdf_object):
+        if pdf_object.object_key not in self.object_store:
+            raise PdfBuildError
+        pdf_section = self.sections[section_number]
+        pdf_object = self.pdf_section.release_pdf_object(pdf_object)
+        del self.object_store[pdf_object.object_key]
+        return pdf_object
 
     def add_page(self):
         if len(self.sections) == 0:
@@ -128,8 +158,8 @@ class PdfFile:
     def merge(self, pdf):
         self.add_update()
         self.version = max(self.version, pdf.version)
-        target_pages = self.document_catalog.pages
-        for i, page in enumerate(pdf.document_catalog.pages):
+        target_pages = self.pages
+        for i, page in enumerate(pdf.pages):
             if i == len(target_pages):
                 target_page = self.add_page()
             else:
@@ -137,6 +167,9 @@ class PdfFile:
             for content_stream in page.objects:
                 new_contents = [c.clone() for c in content_stream.contents]
                 target_page.add_content_stream(new_contents)
+            for font_ref in page.resources['Font'].values():
+                pdf_object = pdf.object_store[font_ref.object_key]
+                target_page.add_font(pdf_object.contents['BaseFont'].value)
         return self
 
     def clone(self):
@@ -233,10 +266,14 @@ class FileSection:
 
         return self
 
-    def add_pdf_object(self, contents):
-        pdf_object = self.body.add_pdf_object(contents)
+    def add_pdf_object(self, pdf_object):
+        pdf_object = self.body.add_pdf_object(pdf_object)
         entry = self.crt_section.add_pdf_object(pdf_object)
         return pdf_object, entry
+
+    def release_pdf_object(self, pdf_object):
+        pdf_object = self.body.release_pdf_object(pdf_object)
+        return pdf_object
 
 
 class FileBody:
@@ -264,27 +301,25 @@ class FileBody:
                 raise PdfBuildError
             self.zeroth_object = pdf_object
             self.free_object_list_tail = pdf_object
-        pdf_object.attach(object_number, generation_number, None)
-        self.objects[(object_number, generation_number)] = pdf_object
+        pdf_object.attach(object_number, generation_number, self.pdf_section, None)
+        self.add_pdf_object(pdf_object)
         self.release_pdf_object(pdf_object)
         return pdf_object
 
-    def add_pdf_object(self, contents):
-        pdf_object = PdfIndirectObject()
-        max_object_number, _ = sorted(self.objects)[-1]
-        object_number = max_object_number + 1
-        generation_number = 0
-        pdf_object.attach(object_number, generation_number, contents)
-        self.objects[(object_number, generation_number)] = pdf_object
+    def add_pdf_object(self, pdf_object):
+        self.objects[pdf_object.object_key] = pdf_object
         return pdf_object
 
     def release_pdf_object(self, pdf_object):
         # produces a free object
         pdf_object.release(self.zeroth_object)
+
         # set previous tail's next free object
         self.free_object_list_tail.next_free_object = pdf_object
+
         # set new tail
         self.free_object_list_tail = pdf_object
+
         return pdf_object
 
     def format(self):
@@ -306,15 +341,15 @@ class FileBody:
         # parse objects supplied by cross-reference table
         for subsection in self.pdf_section.crt_section.subsections:
             for entry in subsection.entries:
-                entry_key = (entry.object_number, entry.generation_number)
                 if entry.free is True:
-                    entry.pdf_object = self.make_free_object(*entry_key)
+                    entry.pdf_object = self.make_free_object(*entry.object_key)
                 else:
                     io_buffer.seek(entry.first_item, io.SEEK_SET)
                     entry.pdf_object = PdfIndirectObject().parse(io_buffer)
-                    if entry_key not in self.pdf_section.pdf_file.object_store:
-                        self.pdf_section.pdf_file.object_store[entry_key] = entry.pdf_object
-                    self.objects[entry_key] = entry.pdf_object
+                    entry.pdf_object.pdf_section = self.pdf_section
+                    self.add_pdf_object(entry.pdf_object)
+                    if entry.object_key not in self.pdf_section.pdf_file.object_store:
+                        self.pdf_section.pdf_file.object_store[entry.object_key] = entry.pdf_object
         return self
 
 
@@ -333,15 +368,34 @@ class CrtSection:
 
     def setup(self):
         # pdf file is being built from scratch, so create the basic objects
-        self.subsections = [CrtSubsection(self.pdf_section)]
         self.add_pdf_object(self.pdf_section.body.zeroth_object)
         return self
 
     def add_pdf_object(self, pdf_object):
-        subsection = self.subsections[-1]
         entry = CrtEntry(self.pdf_section)
         entry.pdf_object = pdf_object
-        subsection.entries.append(entry)
+        found_subsection = False
+        subsection_placement_index = None
+        for i, subsection in enumerate(self.subsections):
+            first_object_number = subsection.entries[0].pdf_object.object_number
+            last_object_number = subsection.entries[-1].pdf_object.object_number
+            if pdf_object.object_number == first_object_number-1:
+                subsection.entries = [entry] + subsection.entries
+                found_subsection = True
+                break
+            if pdf_object.object_number == last_object_number+1:
+                subsection.entries.append(entry)
+                found_subsection = True
+                break
+            if subsection_placement_index is None and pdf_object.object_number < first_object_number-1:
+                subsection_placement_index = i
+        if found_subsection is False:
+            subsection_placement_index = subsection_placement_index or len(self.subsections)
+            new_subsection = CrtSubsection(self.pdf_section)
+            new_subsection.entries.append(entry)
+            before = self.subsections[:subsection_placement_index]
+            after = self.subsections[subsection_placement_index:]
+            self.subsections = before + [new_subsection] + after
         self.pdf_section.trailer.size += 1
         return entry
 
@@ -407,6 +461,10 @@ class CrtEntry:
         self.generation_number = None
         self.first_item = None
         self.free = None
+
+    @property
+    def object_key(self):
+        return (self.object_number, self.generation_number)
 
     def format(self):
         if self.pdf_object is None:
@@ -518,10 +576,6 @@ class DocumentCatalog:
         # self.named_destinations = named_destinations
         # self.interactive_form = interactive_form
 
-    @property
-    def pages(self):
-        return self.page_tree.get_pages()
-
     def __repr__(self):
         return f'{self.__class__.__name__}({self.page_tree}, version={self.version}, page_layout={self.page_layout})'
 
@@ -555,9 +609,6 @@ class PageTreeNode:
 
         self.pdf_object = None
 
-        self.kids = PdfArray()
-        self.count = PdfInteger()
-
         # inheritable properties
         self.resources = None
         self.media_box = None
@@ -569,8 +620,8 @@ class PageTreeNode:
         self.pdf_object, _ = self.pdf_file.add_pdf_object(
             PdfDict({
                 PdfName('Type'):  PdfName('Pages'),
-                PdfName('Kids'): self.kids,
-                PdfName('Count'): self.count,
+                PdfName('Kids'): PdfArray(),
+                PdfName('Count'): PdfInteger(),
             })
         )
         return self
@@ -587,7 +638,6 @@ class PageTreeNode:
     def from_object(self, pdf_object):
         self.pdf_object = pdf_object
         self.resources = pdf_object.contents.get('Resources')
-        self.kids = pdf_object.contents['Kids']
         for kid_ref in pdf_object.contents['Kids']:
             object_key = (kid_ref.object_number, kid_ref.generation_number)
             if object_key not in self.pdf_file.object_store:
@@ -599,14 +649,15 @@ class PageTreeNode:
                 self.children.append(PageObject(self.pdf_file, self).from_object(kid_object))
             else:
                 raise PdfParseError
-            self.count += 1
         return self
 
     def add_page(self):
         page = PageObject(self.pdf_file, self).setup()
         self.children.append(page)
-        self.kids.append(page.pdf_object.ref)
-        self.count += 1
+        if self.pdf_object.pdf_section is not self.pdf_file.sections[-1]:
+            self.pdf_object, _ = self.pdf_file.update_pdf_object(self.pdf_object, self.pdf_object.contents.clone())
+        self.pdf_object.contents['Kids'].append(page.pdf_object.ref)
+        self.pdf_object.contents['Count'] += 1
         return page
 
 
@@ -687,7 +738,7 @@ class PageObject:
             TextMatrixOperation(),
             TextFontOperation(font_alias_name=font_alias_name, size=size),
             TextLeadingOperation(leading=line_size),
-            TextShowOperation(text=text),
+            TextShowOperation(text=PdfLiteralString(text)),
             TextNextLineOperation()
         ])
         cm = ConcatenateMatrixOperation()
