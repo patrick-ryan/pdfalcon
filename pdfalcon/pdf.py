@@ -19,7 +19,7 @@ class PdfFile:
         from, if not just to modularize high-level / client functionality
     """
 
-    def __init__(self, version=None):
+    def __init__(self, version=None, setup=True):
         version, _ = get_optional_entry('version', version)
         self.version = PdfReal(version)
 
@@ -38,6 +38,9 @@ class PdfFile:
 
         # set at format-time
         self.cur_format_byte_offset = None
+
+        if setup is True:
+            self.setup()
 
     @property
     def pages(self):
@@ -72,6 +75,7 @@ class PdfFile:
 
     def parse(self, io_buffer):
         # create pdf file and document structures from pdf syntax
+        self.__init__(setup=False)
         self.header = FileHeader(self)
         self.header.parse(io_buffer)
 
@@ -79,7 +83,7 @@ class PdfFile:
             if len(self.sections) > 0 and self.sections[0].trailer.trailer_dict.get('Prev') is None:
                 break
             file_section = FileSection(self).parse(io_buffer)
-            self.sections = [file_section] + self.sections
+            self.sections.insert(0, file_section)
 
         root = self.sections[-1].trailer.trailer_dict['Root']
         object_key = (root.object_number, root.generation_number)
@@ -160,7 +164,7 @@ class PdfFile:
         self.version = max(self.version, pdf.version)
         target_pages = self.pages
         for i, page in enumerate(pdf.pages):
-            if i == len(target_pages):
+            if i >= len(target_pages):
                 target_page = self.add_page()
             else:
                 target_page = target_pages[i]
@@ -173,7 +177,7 @@ class PdfFile:
         return self
 
     def clone(self):
-        return self.__class__().setup().merge(self)
+        return self.__class__().merge(self)
 
 
 class FileHeader:
@@ -380,7 +384,7 @@ class CrtSection:
             first_object_number = subsection.entries[0].pdf_object.object_number
             last_object_number = subsection.entries[-1].pdf_object.object_number
             if pdf_object.object_number == first_object_number-1:
-                subsection.entries = [entry] + subsection.entries
+                subsection.entries.insert(0, entry)
                 found_subsection = True
                 break
             if pdf_object.object_number == last_object_number+1:
@@ -393,9 +397,7 @@ class CrtSection:
             subsection_placement_index = subsection_placement_index or len(self.subsections)
             new_subsection = CrtSubsection(self.pdf_section)
             new_subsection.entries.append(entry)
-            before = self.subsections[:subsection_placement_index]
-            after = self.subsections[subsection_placement_index:]
-            self.subsections = before + [new_subsection] + after
+            self.subsections.insert(subsection_placement_index, new_subsection)
         self.pdf_section.trailer.size += 1
         return entry
 

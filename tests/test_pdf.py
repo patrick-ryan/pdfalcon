@@ -42,7 +42,7 @@ def read_from_file(write_fn):
         @functools.wraps(test)
         def fn(*args, **kwargs):
             with open(f'{OUTPUT_DIR}/{write_fn.__name__}.pdf', 'rb') as f:
-                pdf = PdfFile().read(f)
+                pdf = PdfFile(setup=False).read(f)
             test(*args, pdf=pdf, **kwargs)
         return fn
     return param_fn
@@ -51,7 +51,7 @@ def read_from_file(write_fn):
 @pytest.mark.dependency()
 @write_to_file
 def test_write_text():
-    pdf = PdfFile()
+    pdf = PdfFile(setup=False)
     assert pdf.document_catalog is None
     assert len(pdf.sections) == 0
     assert len(pdf.object_store) == 0
