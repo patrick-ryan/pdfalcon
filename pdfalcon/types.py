@@ -1,13 +1,15 @@
 import abc
+import base64
 import collections
 import io
 import math
 import numbers
 import numpy as np
 import textwrap
+import zlib
 
 from pdfalcon.exceptions import PdfFormatError, PdfParseError, PdfValueError
-from pdfalcon.utils import read_pdf_tokens, read_lines
+from pdfalcon.parsing import read_lines, read_pdf_tokens
 
 
 def parse_pdf_object(io_buffer):
@@ -34,6 +36,7 @@ def parse_pdf_object(io_buffer):
 
             if dict_post_token == b'stream':
                 # stream type
+                next(read_lines(io_buffer))
                 return PdfStream(stream_dict=result).parse(io_buffer)
             else:
                 io_buffer.seek(dict_end_offset, io.SEEK_SET)
@@ -133,75 +136,6 @@ def parse_pdf_object(io_buffer):
         else:
             io_buffer.seek(token_end_offset, io.SEEK_SET)
             return PdfInteger(first_token)
-
-
-def parse_stream_object(io_buffer, _op_args=None):
-    _op_args = _op_args or []
-    tokens = read_pdf_tokens(io_buffer)
-    start_offset = io_buffer.tell()
-    first_token = next(tokens, None)
-    if first_token is None:
-        # unexpected EOF
-        raise PdfParseError
-    elif first_token == b'endstream':
-        if len(_op_args) > 0:
-            # unexpected end of instruction
-            raise PdfParseError
-        return None
-    elif first_token == b'q':
-        return StateSaveOperation()
-    elif first_token == b'Q':
-        return StateRestoreOperation()
-    elif first_token == b'cm':
-        if len(_op_args) != 6:
-            raise PdfParseError
-        a, b, c, d, e, f = _op_args
-        transformation_matrix = \
-            [[a, b, 0],
-             [c, d, 0],
-             [e, f, 1]]
-        return ConcatenateMatrixOperation(transformation_matrix=transformation_matrix)
-    elif first_token == b'w':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return LineWidthOperation(width=_op_args[0])
-    elif first_token == b'J':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return LineCapStyleOperation(cap_style=_op_args[0])
-    elif first_token == b'j':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return LineJoinStyleOperation(join_style=_op_args[0])
-    elif first_token == b'M':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return MiterLimitOperation(limit=_op_args[0])
-    elif first_token == b'd':
-        if len(_op_args) != 2:
-            raise PdfParseError
-        return DashPatternOperation(dash_array=_op_args[0], dash_phase=_op_args[1])
-    elif first_token == b'ri':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return ColorRenderIntentOperation(intent=_op_args[0])
-    elif first_token == b'i':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return FlatnessToleranceOperation(flatness=_op_args[0])
-    elif first_token == b'gs':
-        if len(_op_args) != 1:
-            raise PdfParseError
-        return StateParametersOperation(param_dict_name=_op_args[0])
-    elif first_token == b'BT':
-        io_buffer.seek(start_offset, io.SEEK_SET)
-        return StreamTextObject().parse(io_buffer)
-    else:
-        # must be an instruction arg
-        io_buffer.seek(start_offset, io.SEEK_SET)
-        _op_args.append(parse_pdf_object(io_buffer).value)
-        return parse_stream_object(io_buffer, _op_args=_op_args)
-
 
 
 class BaseObject(abc.ABC):
@@ -330,9 +264,11 @@ class PdfNumeric(numbers.Real, PdfObject):
         value = self.value.__ceil__()
         return self.__class__(value)
 
+    def __int__(self):
+        return self.value.__int__()
+
     def __float__(self):
-        value = self.value.__float__()
-        return self.__class__(value)
+        return self.value.__float__()
 
     def __floor__(self):
         value = self.value.__floor__()
@@ -476,28 +412,119 @@ class PdfStream(PdfObject):
         endstream
     ''').strip()
 
-    def __init__(self, stream_dict=None, contents=None):
+    def __init__(self, stream_dict=None, contents=None, filters=None):
         self.stream_dict = stream_dict
         self.contents = contents or []
 
     def format(self):
         if self.contents is None:
             raise PdfFormatError
-        contents = '\n'.join([x.format() for x in self.contents])
+        contents = '\n'.join([x.format() for x in self.contents]).encode()
         stream_dict = PdfDict(self.stream_dict or {})
+
+        stream_filters = stream_dict.get('Filter', [])
+        if isinstance(stream_filters, PdfName):
+            stream_filters = [stream_filters]
+        for stream_filter in stream_filters[::-1]:
+            if stream_filter == 'ASCII85Decode':
+                # readers may not like the beginning `<~` (such as qpdfview) so this indexes past that
+                contents = base64.a85encode(contents, adobe=True)[2:]
+            elif stream_filter == 'FlateDecode':
+                contents = zlib.compress(contents)
+            else:
+                raise PdfParseError
+
         stream_dict.update({PdfName('Length'): PdfInteger(len(contents))})
         stream_dict = stream_dict.format()
-        return self._str.format(stream_dict=stream_dict, contents=contents)
+        return self._str.format(stream_dict=stream_dict, contents=contents.decode())
+
+    def _parse_stream_object(self, io_buffer, _op_args=None):
+        _op_args = _op_args or []
+        tokens = read_pdf_tokens(io_buffer)
+        start_offset = io_buffer.tell()
+        first_token = next(tokens, None)
+        if first_token is None:
+            return None
+        elif first_token == b'q':
+            return StateSaveOperation()
+        elif first_token == b'Q':
+            return StateRestoreOperation()
+        elif first_token == b'cm':
+            if len(_op_args) != 6:
+                raise PdfParseError
+            a, b, c, d, e, f = _op_args
+            transformation_matrix = \
+                [[a, b, 0],
+                 [c, d, 0],
+                 [e, f, 1]]
+            return ConcatenateMatrixOperation(transformation_matrix=transformation_matrix)
+        elif first_token == b'w':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return LineWidthOperation(width=_op_args[0])
+        elif first_token == b'J':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return LineCapStyleOperation(cap_style=_op_args[0])
+        elif first_token == b'j':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return LineJoinStyleOperation(join_style=_op_args[0])
+        elif first_token == b'M':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return MiterLimitOperation(limit=_op_args[0])
+        elif first_token == b'd':
+            if len(_op_args) != 2:
+                raise PdfParseError
+            return DashPatternOperation(dash_array=_op_args[0], dash_phase=_op_args[1])
+        elif first_token == b'ri':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return ColorRenderIntentOperation(intent=_op_args[0])
+        elif first_token == b'i':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return FlatnessToleranceOperation(flatness=_op_args[0])
+        elif first_token == b'gs':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return StateParametersOperation(param_dict_name=_op_args[0])
+        elif first_token == b'BT':
+            io_buffer.seek(start_offset, io.SEEK_SET)
+            return StreamTextObject().parse(io_buffer)
+        else:
+            # must be an instruction arg
+            io_buffer.seek(start_offset, io.SEEK_SET)
+            _op_args.append(parse_pdf_object(io_buffer).value)
+            return self._parse_stream_object(io_buffer, _op_args=_op_args)
 
     def parse(self, io_buffer):
-        # TODO: apply decoding filters, handle special whitespace
         if self.stream_dict is None:
             self.stream_dict = PdfDict().parse(io_buffer)
+
+        stream_length = int(self.stream_dict['Length'])
+        stream_contents = io_buffer.read(stream_length)
+        stream_filters = self.stream_dict.get('Filter', [])
+        if isinstance(stream_filters, PdfName):
+            stream_filters = [stream_filters]
+        for stream_filter in stream_filters:
+            if stream_filter == 'ASCII85Decode':
+                stream_contents = base64.a85decode(stream_contents, adobe=True)
+            elif stream_filter == 'FlateDecode':
+                stream_contents = zlib.decompress(stream_contents)
+            else:
+                raise PdfParseError
+        stream_buffer = io.BytesIO(stream_contents)
+
         while True:
-            parsed_object = parse_stream_object(io_buffer)
+            parsed_object = self._parse_stream_object(stream_buffer)
             if parsed_object is None:
                 break
             self.contents.append(parsed_object)
+
+        if next(read_pdf_tokens(io_buffer)) != b'endstream':
+            raise PdfParseError
         return self
 
 

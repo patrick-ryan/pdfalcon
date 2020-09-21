@@ -5,7 +5,8 @@ from pdfalcon.exceptions import PdfIoError, PdfBuildError, PdfFormatError, PdfPa
 from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, PdfLiteralString, \
     ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
     TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation
-from pdfalcon.utils import get_inherited_entry, get_optional_entry, read_lines, read_pdf_tokens, reverse_read_lines
+from pdfalcon.options import get_inherited_entry, get_optional_entry
+from pdfalcon.parsing import read_lines, read_pdf_tokens, reverse_read_lines
 
 
 class PdfFile:
@@ -783,9 +784,10 @@ class Font:
 
 class ContentStream:
 
-    def __init__(self, pdf_file, contents=None):
+    def __init__(self, pdf_file, contents=None, filters=None):
         self.pdf_file = pdf_file
         self.contents = contents
+        self.filters = filters or ['ASCII85Decode', 'FlateDecode']
 
         self.pdf_object = None
 
@@ -796,7 +798,10 @@ class ContentStream:
         return self
 
     def setup(self):
+        stream_dict = PdfDict({
+            PdfName('Filter'): PdfArray([PdfName(f) for f in self.filters])
+        })
         self.pdf_object, _ = self.pdf_file.add_pdf_object(
-            PdfStream(contents=self.contents)
+            PdfStream(contents=self.contents, stream_dict=stream_dict)
         )
         return self

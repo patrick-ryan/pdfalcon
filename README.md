@@ -7,6 +7,7 @@ A pythonic PDF management library (and falcons are cool)
 
 Writing a new pdf:
 ```python
+from pdfalcon.pdf import PdfFile
 pdf = PdfFile()
 page = pdf.add_page()
 quote = '"Just as sight recognizes darkness by the experience of not seeing, '
@@ -19,6 +20,7 @@ with open('/tmp/test.pdf', 'wb') as f:
 
 Parsing a pdf:
 ```python
+from pdfalcon.pdf import PdfFile
 with open('/tmp/test.pdf', 'rb') as f:
     pdf = PdfFile(setup=False).read(f)
 ```
@@ -34,7 +36,9 @@ qpdfview /tmp/test.pdf
 
 ## Planned
 
+* support encodings, special stream whitespace
 * add stream filters
+* add date parsing
 * add image management capabilities
   * add image to page
 * finish adding graphics operations
@@ -50,6 +54,9 @@ qpdfview /tmp/test.pdf
 * add comments support
 * add remaining page layout options
 * documentation
+* icon (multidirectional F with falcon outline)
+* support security
+* support encryption
 
 
 ## Expansion

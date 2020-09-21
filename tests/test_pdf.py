@@ -21,7 +21,8 @@ from pdfalcon.types import parse_pdf_object, \
     PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfLiteralString, PdfName, PdfReal, PdfStream, \
     ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
     TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation
-from pdfalcon.utils import get_inherited_entry, get_optional_entry, read_lines, read_pdf_tokens, reverse_read_lines
+from pdfalcon.options import get_inherited_entry, get_optional_entry
+from pdfalcon.parsing import read_lines, read_pdf_tokens, reverse_read_lines
 
 
 # use `qpdfview <file>` to open pdf and view logs
