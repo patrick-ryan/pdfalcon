@@ -67,7 +67,7 @@ def test_write_text():
     assert sec.body.zeroth_object.object_key == (0, 65535)
     assert sec.body.free_object_list_tail is not None
     assert len(sec.crt_section.subsections[0].entries) == 3
-    assert sec.trailer.size.value == 3
+    assert sec.trailer.size == 3
     assert len(sec.body.objects) == 3
 
     page = pdf.add_page()
@@ -77,7 +77,7 @@ def test_write_text():
     assert len(pdf.document_catalog.page_tree.children) == 1
     assert pdf.document_catalog.page_tree.children[0] == page
     assert len(sec.crt_section.subsections[0].entries) == 4
-    assert sec.trailer.size.value == 4
+    assert sec.trailer.size == 4
     assert len(sec.body.objects) == 4
 
     text_obj = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
@@ -87,7 +87,7 @@ def test_write_text():
     assert pdf.document_catalog.page_tree.children[0].objects[0].contents[2] == text_obj
     assert len(text_obj.contents) == 5
     assert len(sec.crt_section.subsections[0].entries) == 6
-    assert sec.trailer.size.value == 6
+    assert sec.trailer.size == 6
     assert len(sec.body.objects) == 6
 
     return pdf
@@ -100,9 +100,9 @@ def test_read_text(pdf=None):
     sec = pdf.sections[0]
     assert len(sec.crt_section.subsections[0].entries) == 6
     assert sec.trailer.crt_byte_offset is not None
-    assert sec.trailer.trailer_dict['Root'].object_number == 2
-    assert sec.trailer.trailer_dict['Root'].generation_number == 0
-    assert sec.trailer.size.value == 6
+    assert sec.trailer.root.object_number == 2
+    assert sec.trailer.root.generation_number == 0
+    assert sec.trailer.size == 6
     # intentionally missing the zeroth object (bc it's free)
     assert len(pdf.object_store) == 5
     assert isinstance(pdf.document_catalog, DocumentCatalog)
@@ -191,14 +191,14 @@ def test_clone(pdf=None):
     assert sec.body.zeroth_object.object_key == (0, 65535)
     assert sec.body.free_object_list_tail is not None
     assert len(sec.crt_section.subsections[0].entries) == 3
-    assert sec.trailer.size.value == 3
+    assert sec.trailer.size == 3
     assert len(sec.body.objects) == 3
 
     sec2 = new_pdf.sections[1]
     assert isinstance(new_pdf.document_catalog.page_tree.children[0].objects[0], ContentStream)
     assert len(new_pdf.document_catalog.page_tree.children[0].objects[0].contents) == 4
     assert len(sec2.crt_section.subsections[0].entries) == 2
-    assert sec2.trailer.size.value == 5
+    assert sec2.trailer.size == 5
     assert len(sec2.body.objects) == 5
 
     assert (set(sec.body.objects) & set(sec2.body.objects)) == {(0,65535), (1,0)}

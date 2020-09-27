@@ -36,12 +36,12 @@ qpdfview /tmp/test.pdf
 
 ## Planned
 
-* support encodings, special stream whitespace
-* add stream filters
+* support special stream whitespace
 * add date parsing
 * add image management capabilities
   * add image to page
 * finish adding graphics operations
+* support more stream filters
 * add more text formatting options
   * line wrapping
   * more fonts

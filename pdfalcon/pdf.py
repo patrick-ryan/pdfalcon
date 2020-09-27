@@ -1,5 +1,4 @@
 import io
-import textwrap
 
 from pdfalcon.exceptions import PdfIoError, PdfBuildError, PdfFormatError, PdfParseError
 from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, PdfLiteralString, \
@@ -37,11 +36,30 @@ class PdfFile:
         # all in-use objects
         self.object_store = {}
 
-        # set at format-time
         self.cur_format_byte_offset = None
 
         if setup is True:
             self.setup()
+
+    def __bytes__(self):
+        # convert the pdf file object to pdf syntax
+        if len(self.sections) == 0:
+            raise PdfBuildError
+
+        output_lines = []
+        formatted_header = bytes(self.header)
+        self.cur_format_byte_offset = len(formatted_header)+2
+        output_lines.append(formatted_header)
+
+        for i, section in enumerate(self.sections):
+            if i > 0:
+                section.trailer.prev = self.sections[i-1].trailer.crt_byte_offset
+            formatted_section = bytes(section)
+            self.cur_format_byte_offset += 2
+            output_lines.append(formatted_section)
+        self.cur_format_byte_offset -= 2
+
+        return b'\n\n'.join(output_lines)
 
     @property
     def pages(self):
@@ -56,24 +74,6 @@ class PdfFile:
         self.document_catalog = DocumentCatalog(self).setup()
         return self
 
-    def format(self):
-        # convert the pdf file object to pdf syntax
-        if len(self.sections) == 0:
-            raise PdfBuildError
-
-        output_lines = []
-        formatted_header = self.header.format()
-        self.cur_format_byte_offset = len(formatted_header.encode())+2
-        output_lines.append(formatted_header)
-
-        for section in self.sections:
-            formatted_section = section.format()
-            self.cur_format_byte_offset += 2
-            output_lines.append(formatted_section)
-        self.cur_format_byte_offset -= 2
-
-        return '\n\n'.join(output_lines)
-
     def parse(self, io_buffer):
         # create pdf file and document structures from pdf syntax
         self.__init__(setup=False)
@@ -81,12 +81,12 @@ class PdfFile:
         self.header.parse(io_buffer)
 
         while True:
-            if len(self.sections) > 0 and self.sections[0].trailer.trailer_dict.get('Prev') is None:
+            if len(self.sections) > 0 and self.sections[0].trailer.prev is None:
                 break
             file_section = FileSection(self).parse(io_buffer)
             self.sections.insert(0, file_section)
 
-        root = self.sections[-1].trailer.trailer_dict['Root']
+        root = self.sections[-1].trailer.root
         object_key = (root.object_number, root.generation_number)
         if object_key not in self.object_store:
             raise PdfParseError
@@ -147,7 +147,7 @@ class PdfFile:
             raise PdfIoError
         if not io_buffer.writable():
             raise PdfIoError
-        io_buffer.write(self.format().encode('utf-8'))
+        io_buffer.write(bytes(self))
 
     def read(self, io_buffer):
         # validate and parse an io buffer
@@ -183,29 +183,24 @@ class PdfFile:
 
 class FileHeader:
 
-    _str = textwrap.dedent('''
-        %PDF-{version}
-        %âãÏÓ
-    ''').strip()
-    _tokens = _str.encode('utf-8').split()
-
     def __init__(self, pdf_file):
         self.pdf_file = pdf_file
 
-    def format(self):
-        return self._str.format(version=self.pdf_file.version.format())
+    def __bytes__(self):
+        return b'\n'.join([
+            b'%%PDF-%b' % bytes(PdfReal(self.pdf_file.version)),
+            b'\xc3\xa2\xc3\xa3\xc3\x8f\xc3\x93'
+        ])
 
     def parse(self, io_buffer):
-        _pdf_version, _ = self._tokens
-        _pdf, _ = _pdf_version.split(b'-')
         io_buffer.seek(0, io.SEEK_SET)
         lines = read_lines(io_buffer)
         first_line = next(lines, None)
         if first_line is None:
             raise PdfParseError
-        if first_line.startswith(_pdf) is False:
+        if first_line.startswith(b'%PDF-') is False:
             raise PdfParseError
-        self.pdf_file.version = float(first_line[len(_pdf)+1:])
+        self.pdf_file.version = float(first_line[5:])
         return self
 
 
@@ -218,6 +213,19 @@ class FileSection:
         self.crt_section = None
         self.trailer = None
 
+    def __bytes__(self):
+        body_bytes = bytes(self.body)
+        self.pdf_file.cur_format_byte_offset += len(body_bytes)+2
+        self.trailer.crt_byte_offset = self.pdf_file.cur_format_byte_offset
+
+        crt_section_bytes = bytes(self.crt_section)
+        self.pdf_file.cur_format_byte_offset += len(crt_section_bytes)+2
+
+        trailer_bytes = bytes(self.trailer)
+        self.pdf_file.cur_format_byte_offset += len(trailer_bytes)
+
+        return b'\n\n'.join([body_bytes, crt_section_bytes, trailer_bytes])
+
     def setup(self):
         self.body = FileBody(self)
         self.crt_section = CrtSection(self)
@@ -226,19 +234,6 @@ class FileSection:
         self.body.setup()
         self.crt_section.setup()
         return self
-
-    def format(self):
-        formatted_body = self.body.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_body)+2
-        self.trailer.crt_byte_offset = self.pdf_file.cur_format_byte_offset
-
-        formatted_crt_section = self.crt_section.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_crt_section)+2
-
-        formatted_trailer = self.trailer.format()
-        self.pdf_file.cur_format_byte_offset += len(formatted_trailer)
-
-        return '\n\n'.join([formatted_body, formatted_crt_section, formatted_trailer])
 
     def parse(self, io_buffer):
         self.body = FileBody(self)
@@ -263,7 +258,7 @@ class FileSection:
             self.body.parse(io_buffer)
         else:
             # start where the last update says to start
-            prev_crt_byte_offset = self.pdf_file.sections[0].trailer.trailer_dict['Prev']
+            prev_crt_byte_offset = self.pdf_file.sections[0].trailer.prev
             io_buffer.seek(prev_crt_byte_offset, io.SEEK_SET)
             self.crt_section.parse(io_buffer)
             self.trailer.parse(io_buffer)
@@ -290,13 +285,42 @@ class FileBody:
         self.zeroth_object = None
         self.free_object_list_tail = None
 
-        # set at format-time
         self.object_byte_offset_map = None
+
+    def __bytes__(self):
+        byte_offset = self.pdf_section.pdf_file.cur_format_byte_offset
+        output_lines = []
+        object_byte_offset_map = {}
+        for k in sorted(self.objects):
+            pdf_object = self.objects[k]
+            if pdf_object.attached is True and pdf_object.object_number != 0:
+                obj_bytes = bytes(pdf_object)
+                object_byte_offset_map[pdf_object.object_key] = byte_offset
+                byte_offset += len(obj_bytes)+2
+                output_lines.append(obj_bytes)
+        byte_offset -= 2
+        self.object_byte_offset_map = object_byte_offset_map
+        return b'\n\n'.join(output_lines)
 
     def setup(self):
         # start with zeroth object
         object_number, generation_number = 0, 65535
         pdf_object = self.make_free_object(object_number, generation_number)
+        return self
+
+    def parse(self, io_buffer):
+        # parse objects supplied by cross-reference table
+        for subsection in self.pdf_section.crt_section.subsections:
+            for entry in subsection.entries:
+                if entry.free is True:
+                    entry.pdf_object = self.make_free_object(*entry.object_key)
+                else:
+                    io_buffer.seek(entry.first_item, io.SEEK_SET)
+                    entry.pdf_object = PdfIndirectObject().parse(io_buffer)
+                    entry.pdf_object.pdf_section = self.pdf_section
+                    self.add_pdf_object(entry.pdf_object)
+                    if entry.object_key not in self.pdf_section.pdf_file.object_store:
+                        self.pdf_section.pdf_file.object_store[entry.object_key] = entry.pdf_object
         return self
 
     def make_free_object(self, object_number, generation_number):
@@ -327,44 +351,8 @@ class FileBody:
 
         return pdf_object
 
-    def format(self):
-        byte_offset = self.pdf_section.pdf_file.cur_format_byte_offset
-        output_lines = []
-        object_byte_offset_map = {}
-        for k in sorted(self.objects):
-            pdf_object = self.objects[k]
-            if pdf_object.attached is True and pdf_object.object_number != 0:
-                formatted_object = pdf_object.format()
-                object_byte_offset_map[pdf_object.object_key] = byte_offset
-                byte_offset += len(formatted_object)+2
-                output_lines.append(formatted_object)
-        byte_offset -= 2
-        self.object_byte_offset_map = object_byte_offset_map
-        return '\n\n'.join(output_lines)
-
-    def parse(self, io_buffer):
-        # parse objects supplied by cross-reference table
-        for subsection in self.pdf_section.crt_section.subsections:
-            for entry in subsection.entries:
-                if entry.free is True:
-                    entry.pdf_object = self.make_free_object(*entry.object_key)
-                else:
-                    io_buffer.seek(entry.first_item, io.SEEK_SET)
-                    entry.pdf_object = PdfIndirectObject().parse(io_buffer)
-                    entry.pdf_object.pdf_section = self.pdf_section
-                    self.add_pdf_object(entry.pdf_object)
-                    if entry.object_key not in self.pdf_section.pdf_file.object_store:
-                        self.pdf_section.pdf_file.object_store[entry.object_key] = entry.pdf_object
-        return self
-
 
 class CrtSection:
-
-    _str = textwrap.dedent('''
-        xref
-        {subsections}
-    ''').strip()
-    _tokens = _str.encode('utf-8').split()
 
     def __init__(self, pdf_section):
         self.pdf_section = pdf_section
@@ -402,15 +390,16 @@ class CrtSection:
         self.pdf_section.trailer.size += 1
         return entry
 
-    def format(self):
-        subsections = '\n'.join([subsection.format() for subsection in self.subsections])
-        return self._str.format(subsections=subsections)
+    def __bytes__(self):
+        return b'\n'.join([
+            b'xref',
+            *map(bytes, self.subsections)
+        ])
 
     def parse(self, io_buffer):
-        _xref, _ = self._tokens
         lines = read_lines(io_buffer)
         next_line = next(lines, None)
-        if next_line != _xref:
+        if next_line != b'xref':
             raise PdfParseError
         while True:
             cur_offset = io_buffer.tell()
@@ -430,13 +419,16 @@ class CrtSubsection:
         self.pdf_section = pdf_section
         self.entries = []
 
-    def format(self):
+    def __bytes__(self):
         if len(self.entries) == 0:
             raise PdfFormatError
-        first_object_number = self.entries[0].pdf_object.object_number
-        output_lines = [f"{first_object_number} {len(self.entries)}"]
-        output_lines.extend([entry.format() for entry in self.entries])
-        return '\n'.join(output_lines)
+        return b'\n'.join([
+            b' '.join([
+                bytes(PdfInteger(self.entries[0].pdf_object.object_number)),
+                bytes(PdfInteger(len(self.entries)))
+            ]),
+            *map(bytes, self.entries)
+        ])
 
     def parse(self, io_buffer):
         lines = read_lines(io_buffer)
@@ -459,7 +451,6 @@ class CrtEntry:
 
         self.pdf_object = None
 
-        # set at parse-time
         self.object_number = None
         self.generation_number = None
         self.first_item = None
@@ -469,7 +460,7 @@ class CrtEntry:
     def object_key(self):
         return (self.object_number, self.generation_number)
 
-    def format(self):
+    def __bytes__(self):
         if self.pdf_object is None:
             raise PdfFormatError
         if self.pdf_object.free is True:
@@ -482,7 +473,11 @@ class CrtEntry:
             object_key = (self.pdf_object.object_number, self.pdf_object.generation_number)
             first_item = self.pdf_section.body.object_byte_offset_map[object_key]
             generation_number = self.pdf_object.generation_number
-        return f"{first_item:010} {generation_number:05} {'f' if self.pdf_object.free is True else 'n'} "
+        return b' '.join([
+            bytes(PdfInteger(first_item)).zfill(10),
+            bytes(PdfInteger(generation_number)).zfill(5),
+            b'f ' if self.pdf_object.free is True else b'n '
+        ])
 
     def parse(self, io_buffer):
         line = next(read_lines(io_buffer), None)
@@ -497,46 +492,43 @@ class CrtEntry:
 
 class FileTrailer:
 
-    _str = textwrap.dedent('''
-        trailer
-        {trailer_dict}
-        startxref
-        {crt_byte_offset}
-        %%EOF
-    ''').strip()
-    _tokens = _str.encode('utf-8').split()
-
     def __init__(self, pdf_section):
         self.pdf_section = pdf_section
-        self.size = PdfInteger()
 
-        # set at format/parse-time
         self.crt_byte_offset = None
+        self.size = 0
+        self.root = None
+        self.prev = None
 
-        # set at parse-time
-        self.trailer_dict = None
-
-    def format(self):
-        pdf_dict = self.trailer_dict or PdfDict({
-            PdfName('Root'): self.pdf_section.pdf_file.document_catalog.pdf_object.ref,
-            PdfName('Size'): self.size,
+    def __bytes__(self):
+        trailer_dict = PdfDict({
+            PdfName('Root'): self.root or self.pdf_section.pdf_file.document_catalog.pdf_object.ref,
+            PdfName('Size'): PdfInteger(self.size)
         })
-        trailer_dict = pdf_dict.format()
-        return self._str.format(trailer_dict=trailer_dict, crt_byte_offset=self.crt_byte_offset)
+        if self.prev:
+            trailer_dict[PdfName('Prev')] = PdfInteger(self.prev)
+        return b'\n'.join([
+            b'trailer',
+            bytes(trailer_dict),
+            b'startxref',
+            bytes(PdfInteger(self.crt_byte_offset)),
+            b'%%EOF'
+        ])
 
     def parse(self, io_buffer):
-        _trailer, _, _startxref, _, _eof = self._tokens
         next_token = next(read_pdf_tokens(io_buffer), None)
-        if next_token != _trailer:
+        if next_token != b'trailer':
             raise PdfParseError
 
-        self.trailer_dict = PdfDict().parse(io_buffer)
-        if not isinstance(self.trailer_dict, PdfDict):
+        trailer_dict = PdfDict().parse(io_buffer)
+        if not isinstance(trailer_dict, PdfDict):
             raise PdfParseError
-        self.size = self.trailer_dict['Size']
+        self.size = int(trailer_dict['Size'])
+        self.root = trailer_dict['Root']
+        self.prev = int(trailer_dict['Prev']) if 'Prev' in trailer_dict else None
 
         next_token = next(read_pdf_tokens(io_buffer), None)
-        if next_token != _startxref:
+        if next_token != b'startxref':
             raise PdfParseError
 
         lines = read_lines(io_buffer)
@@ -544,10 +536,10 @@ class FileTrailer:
 
         try:
             self.crt_byte_offset = int(next(lines, None))
-        except ValueError:
-            raise PdfParseError
+        except ValueError as e:
+            raise PdfParseError from e
 
-        if next(lines, None) != _eof:
+        if next(lines, None) != b'%%EOF':
             raise PdfParseError
 
         return self

@@ -1,15 +1,62 @@
 import abc
 import base64
+import codecs
 import collections
 import io
 import math
 import numbers
 import numpy as np
-import textwrap
 import zlib
 
 from pdfalcon.exceptions import PdfFormatError, PdfParseError, PdfValueError
 from pdfalcon.parsing import read_lines, read_pdf_tokens
+
+
+PDF_DOC_ENCODING = {
+    0x16: "\u0017",
+    0x18: "\u02D8",
+    0x19: "\u02C7",
+    0x1A: "\u02C6",
+    0x1B: "\u02D9",
+    0x1C: "\u02DD",
+    0x1D: "\u02DB",
+    0x1E: "\u02DA",
+    0x1F: "\u02DC",
+    0x80: "\u2022",
+    0x81: "\u2020",
+    0x82: "\u2021",
+    0x83: "\u2026",
+    0x84: "\u2014",
+    0x85: "\u2013",
+    0x86: "\u0192",
+    0x87: "\u2044",
+    0x88: "\u2039",
+    0x89: "\u203A",
+    0x8A: "\u2212",
+    0x8B: "\u2030",
+    0x8C: "\u201E",
+    0x8D: "\u201C",
+    0x8E: "\u201D",
+    0x8F: "\u2018",
+    0x90: "\u2019",
+    0x91: "\u201A",
+    0x92: "\u2122",
+    0x93: "\uFB01",
+    0x94: "\uFB02",
+    0x95: "\u0141",
+    0x96: "\u0152",
+    0x97: "\u0160",
+    0x98: "\u0178",
+    0x99: "\u017D",
+    0x9A: "\u0131",
+    0x9B: "\u0142",
+    0x9C: "\u0153",
+    0x9D: "\u0161",
+    0x9E: "\u017E",
+    0xA0: "\u20AC",
+}
+
+ALLOWED_NAME_CHARS = set(range(33, 127)) - {ord(c) for c in "#%/()<>[]{}"}
 
 
 def parse_pdf_object(io_buffer):
@@ -91,7 +138,15 @@ def parse_pdf_object(io_buffer):
                     break
                 stack_level -= 1
             literal_string += next_char
-        return PdfLiteralString(literal_string.decode())
+
+        codec_length = len(codecs.BOM_UTF16_BE)
+        if literal_string[:codec_length] == codecs.BOM_UTF16_BE:
+            literal_string = literal_string[codec_length:].decode('utf_16_be')
+        else:
+            formatter = lambda b: PDF_DOC_ENCODING.get(b, chr(b))
+            literal_string = ''.join(map(formatter, literal_string))
+
+        return PdfLiteralString(literal_string)
     elif first_token == b'true':
         # boolean type
         return PdfBoolean(value=True)
@@ -113,7 +168,7 @@ def parse_pdf_object(io_buffer):
         if solidus_end_offset != name_end_offset-len(name):
             # no whitespace allowed between solidus and name
             raise PdfParseError
-        return PdfName(name.decode())
+        return PdfName(name.decode('us-ascii'))
     else:
         try:
             int(first_token)
@@ -140,12 +195,12 @@ def parse_pdf_object(io_buffer):
 
 class BaseObject(abc.ABC):
 
+    @abc.abstractmethod
+    def __bytes__(self):
+        pass
+
     def __eq__(self, obj):
         return type(obj) == type(self) and vars(obj) == vars(self)
-
-    @abc.abstractmethod
-    def format(self):
-        pass
 
     @classmethod
     def _clone_obj(cls, obj):
@@ -184,14 +239,14 @@ class PdfBoolean(PdfObject):
             raise PdfValueError
         self.value = value
 
-    def format(self):
-        return 'true' if self.value is True else 'false'
+    def __bytes__(self):
+        return b'true' if self.value is True else b'false'
 
 
 class PdfNull(PdfObject):
 
-    def format(self):
-        return 'null'
+    def __bytes__(self):
+        return b'null'
 
 
 class PdfNumeric(numbers.Real, PdfObject):
@@ -296,8 +351,8 @@ class PdfInteger(PdfNumeric):
     def __init__(self, value=None):
         self.value = int(value or 0)
 
-    def format(self):
-        return str(self.value)
+    def __bytes__(self):
+        return b'%d' % self.value
 
 
 class PdfReal(PdfNumeric):
@@ -305,8 +360,8 @@ class PdfReal(PdfNumeric):
     def __init__(self, value=None):
         self.value = float(value or 0)
 
-    def format(self):
-        return str(self.value)
+    def __bytes__(self):
+        return b'%f' % self.value
 
 
 class PdfString(PdfObject):
@@ -326,30 +381,29 @@ class PdfString(PdfObject):
 
 class PdfHexString(PdfString):
 
-    _str = '<{contents}>'
-
-    def format(self):
-        return self._str.format(contents=self.value)
+    def __bytes__(self):
+        formatter = lambda b: b"%02X" % b
+        return b'<%b>' % b''.join(map(formatter, self.value))
 
 
 class PdfLiteralString(PdfString):
 
-    _str = '({contents})'
-
-    def format(self):
-        return self._str.format(contents=self.value)
+    def __bytes__(self):
+        return b'(%b)' % (self.value.encode('utf_16_be'))
 
 
 class PdfDict(collections.abc.MutableMapping, PdfObject):
 
-    _str = textwrap.dedent('''
-        <<
-        {contents}
-        >>
-    ''').strip()
-
     def __init__(self, value=None):
         self.value = dict(value or {})
+
+    def __bytes__(self):
+        formatter = lambda x: b'%b %b' % (bytes(x[0]), bytes(x[1]))
+        return b'\n'.join([
+            b'<<',
+            b'\n  '.join(map(formatter, self.items())),
+            b'>>'
+        ])
 
     def __getitem__(self, index):
         return self.value.__getitem__(index)
@@ -365,11 +419,6 @@ class PdfDict(collections.abc.MutableMapping, PdfObject):
 
     def __len__(self):
         return self.value.__len__()
-
-    def format(self):
-        contents = '\n'.join([f"{k.format()} {v.format()}" for k,v in self.items()])
-        contents = textwrap.indent(contents, '  ')
-        return self._str.format(contents=contents)
 
     def parse(self, io_buffer):
         tokens = read_pdf_tokens(io_buffer)
@@ -405,21 +454,14 @@ class PdfDict(collections.abc.MutableMapping, PdfObject):
 
 class PdfStream(PdfObject):
 
-    _str = textwrap.dedent('''
-        {stream_dict}
-        stream
-        {contents}
-        endstream
-    ''').strip()
-
     def __init__(self, stream_dict=None, contents=None, filters=None):
         self.stream_dict = stream_dict
         self.contents = contents or []
 
-    def format(self):
+    def __bytes__(self):
         if self.contents is None:
             raise PdfFormatError
-        contents = '\n'.join([x.format() for x in self.contents]).encode()
+        contents = b'\n'.join(map(bytes, self.contents))
         stream_dict = PdfDict(self.stream_dict or {})
 
         stream_filters = stream_dict.get('Filter', [])
@@ -435,8 +477,12 @@ class PdfStream(PdfObject):
                 raise PdfParseError
 
         stream_dict.update({PdfName('Length'): PdfInteger(len(contents))})
-        stream_dict = stream_dict.format()
-        return self._str.format(stream_dict=stream_dict, contents=contents.decode())
+        return b'\n'.join([
+            bytes(stream_dict),
+            b'stream',
+            contents,
+            b'endstream'
+        ])
 
     def _parse_stream_object(self, io_buffer, _op_args=None):
         _op_args = _op_args or []
@@ -530,14 +576,14 @@ class PdfStream(PdfObject):
 
 class StateSaveOperation(GraphicsOperation):
 
-    def format(self):
-        return 'q'
+    def __bytes__(self):
+        return b'q'
 
 
 class StateRestoreOperation(GraphicsOperation):
 
-    def format(self):
-        return 'Q'
+    def __bytes__(self):
+        return b'Q'
 
 
 class ConcatenateMatrixOperation(GraphicsOperation):
@@ -547,6 +593,10 @@ class ConcatenateMatrixOperation(GraphicsOperation):
             [[1, 0, 0],
              [0, 1, 0],
              [0, 0, 1]]
+
+    def __bytes__(self):
+        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
+        return b'%f %f %f %f %f %f cm' % (a, b, c, d, e, f)
 
     def add_translation(self, x=None, y=None):
         self.transformation_matrix = np.matmul(
@@ -580,18 +630,14 @@ class ConcatenateMatrixOperation(GraphicsOperation):
              [0, 0, 1]],
             self.transformation_matrix)
 
-    def format(self):
-        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
-        return f"{a} {b} {c} {d} {e} {f} cm"
-
 
 class LineWidthOperation(GraphicsOperation):
 
     def __init__(self, width=None):
         self.width = width
 
-    def format(self):
-        return f"{self.width} w"
+    def __bytes__(self):
+        return b"%d w" % self.width
 
 
 class LineCapStyleOperation(GraphicsOperation):
@@ -599,8 +645,8 @@ class LineCapStyleOperation(GraphicsOperation):
     def __init__(self, cap_style=None):
         self.cap_style = cap_style
 
-    def format(self):
-        return f"{self.cap_style} J"
+    def __bytes__(self):
+        return b"%d J" % self.cap_style
 
 
 class LineJoinStyleOperation(GraphicsOperation):
@@ -608,8 +654,8 @@ class LineJoinStyleOperation(GraphicsOperation):
     def __init__(self, join_style=None):
         self.join_style = join_style
 
-    def format(self):
-        return f"{self.join_style} j"
+    def __bytes__(self):
+        return b"%d j" % self.join_style
 
 
 class MiterLimitOperation(GraphicsOperation):
@@ -617,8 +663,8 @@ class MiterLimitOperation(GraphicsOperation):
     def __init__(self, limit=None):
         self.limit = limit
 
-    def format(self):
-        return f"{self.limit} M"
+    def __bytes__(self):
+        return b"%d M" % self.limit
 
 
 class DashPatternOperation(GraphicsOperation):
@@ -627,8 +673,8 @@ class DashPatternOperation(GraphicsOperation):
         self.dash_array = dash_array
         self.dash_phase = dash_phase
 
-    def format(self):
-        return f"{self.dash_array} {self.dash_phase} d"
+    def __bytes__(self):
+        return b"%b %d d" % (bytes(self.dash_array), self.dash_phase)
 
 
 class ColorRenderIntentOperation(GraphicsOperation):
@@ -636,8 +682,8 @@ class ColorRenderIntentOperation(GraphicsOperation):
     def __init__(self, intent=None):
         self.intent = intent
 
-    def format(self):
-        return f"{self.intent} ri"
+    def __bytes__(self):
+        return b"%b ri" % bytes(self.intent)
 
 
 class FlatnessToleranceOperation(GraphicsOperation):
@@ -645,8 +691,8 @@ class FlatnessToleranceOperation(GraphicsOperation):
     def __init__(self, flatness=None):
         self.flatness = flatness
 
-    def format(self):
-        return f"{self.flatness} i"
+    def __bytes__(self):
+        return b"%d i" % self.flatness
 
 
 class StateParametersOperation(GraphicsOperation):
@@ -654,8 +700,8 @@ class StateParametersOperation(GraphicsOperation):
     def __init__(self, param_dict_name=None):
         self.param_dict_name = param_dict_name
 
-    def format(self):
-        return f"{self.param_dict_name.format()} gs"
+    def __bytes__(self):
+        return b"%b gs" % bytes(self.param_dict_name)
 
 
 class TextFontOperation(GraphicsOperation):
@@ -664,8 +710,8 @@ class TextFontOperation(GraphicsOperation):
         self.font_alias_name = font_alias_name
         self.size = size
 
-    def format(self):
-        return f"{self.font_alias_name.format()} {self.size} Tf"
+    def __bytes__(self):
+        return b"%b %d Tf" % (bytes(self.font_alias_name), self.size)
 
 
 class TextLeadingOperation(GraphicsOperation):
@@ -673,8 +719,8 @@ class TextLeadingOperation(GraphicsOperation):
     def __init__(self, leading=None):
         self.leading = leading
 
-    def format(self):
-        return f"{self.leading} TL"
+    def __bytes__(self):
+        return b"%d TL" % self.leading
 
 
 class TextMatrixOperation(GraphicsOperation):
@@ -685,15 +731,15 @@ class TextMatrixOperation(GraphicsOperation):
              [0, 1, 0],
              [0, 0, 1]]
 
-    def format(self):
+    def __bytes__(self):
         [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
-        return f"{a} {b} {c} {d} {e} {f} Tm"
+        return b'%f %f %f %f %f %f Tm' % (a, b, c, d, e, f)
 
 
 class TextNextLineOperation(GraphicsOperation):
 
-    def format(self):
-        return 'T*'
+    def __bytes__(self):
+        return b'T*'
 
 
 class TextShowOperation(GraphicsOperation):
@@ -701,8 +747,8 @@ class TextShowOperation(GraphicsOperation):
     def __init__(self, text=None):
         self.text = text
 
-    def format(self):
-        return f"{self.text.format()} Tj"
+    def __bytes__(self):
+        return b"%b Tj" % bytes(self.text)
 
 
 class TextCharSpaceOperation(GraphicsOperation):
@@ -710,8 +756,8 @@ class TextCharSpaceOperation(GraphicsOperation):
     def __init__(self, char_space=None):
         self.char_space = char_space
 
-    def format(self):
-        return f"{self.char_space} Tc"
+    def __bytes__(self):
+        return b"%d Tc" % self.char_space
 
 
 class TextWordSpaceOperation(GraphicsOperation):
@@ -719,8 +765,8 @@ class TextWordSpaceOperation(GraphicsOperation):
     def __init__(self, word_space=None):
         self.word_space = word_space
 
-    def format(self):
-        return f"{self.word_space} Tw"
+    def __bytes__(self):
+        return b"%d Tw" % self.word_space
 
 
 class TextScaleOperation(GraphicsOperation):
@@ -728,8 +774,8 @@ class TextScaleOperation(GraphicsOperation):
     def __init__(self, scale=None):
         self.scale = scale
 
-    def format(self):
-        return f"{self.scale} Tz"
+    def __bytes__(self):
+        return b"%d Tz" % self.scale
 
 
 class TextRenderModeOperation(GraphicsOperation):
@@ -737,8 +783,8 @@ class TextRenderModeOperation(GraphicsOperation):
     def __init__(self, render_mode=None):
         self.render_mode = render_mode
 
-    def format(self):
-        return f"{self.render_mode} Tr"
+    def __bytes__(self):
+        return "%d Tr" % self.render_mode
 
 
 class TextRiseOperation(GraphicsOperation):
@@ -746,8 +792,8 @@ class TextRiseOperation(GraphicsOperation):
     def __init__(self, rise=None):
         self.rise = rise
 
-    def format(self):
-        return f"{self.rise} Ts"
+    def __bytes__(self):
+        return b"%d Ts" % self.rise
 
 
 class StreamTextObject(GraphicsObject):
@@ -755,13 +801,13 @@ class StreamTextObject(GraphicsObject):
     def __init__(self, contents=None):
         self.contents = contents or []
 
-    def format(self):
-        output_lines = [
-            "BT ",
-            *[textwrap.indent(c.format(), '  ') for c in self.contents],
-            "ET"
-        ]
-        return '\n'.join(output_lines)
+    def __bytes__(self):
+        formatter = lambda x: b'  %b' % bytes(x)
+        return b'\n'.join([
+            b'BT ',
+            *map(formatter, self.contents),
+            b'ET'
+        ])
 
     def parse(self, io_buffer):
         tokens = read_pdf_tokens(io_buffer)
@@ -861,41 +907,39 @@ class PdfArray(collections.abc.MutableSequence, PdfObject):
     def insert(self, index, value):
         return self.value.insert(index, value)
 
-    def format(self):
-        fmt = lambda x: x.format()
-        contents = map(fmt, self)
+    def __bytes__(self):
+        contents = map(bytes, self)
         if len(self) == 1:
-            contents = ' '.join(contents)
-            return f"[ {contents} ]"
+            contents = b' '.join(contents)
+            return b"[ %b ]" % contents
         else:
-            contents = textwrap.indent('\n'.join(contents), '  ')
-            return f"[\n{contents}\n]"
+            contents = b'\n  '.join(contents)
+            return b"[\n%b\n]" % contents
 
 
 class PdfName(PdfString):
 
-    _str = '/{contents}'
+    def __repr__(self):
+        return self.value.__repr__()
 
-    def format(self):
-        return self._str.format(contents=self.value)
+    def __bytes__(self):
+        result = bytearray(b'/')
+        name_bytes = self.value.encode('us-ascii')
+        for b in name_bytes:
+            if b in ALLOWED_NAME_CHARS:
+                result.append(b)
+            else:
+                result.extend(b"#%02X" % b)
+        return bytes(result)
 
 
 class PdfComment(PdfString):
 
-    _str = '%{contents}'
-
-    def format(self):
-        return self._str.format(contents=self.value)
+    def __bytes__(self):
+        return b'%%%b' % self.value.encode('utf-8')
 
 
 class PdfIndirectObject(PdfObject):
-
-    _str = textwrap.dedent('''
-        {object_number} {generation_number} obj
-        {contents}
-        endobj
-    ''').strip()
-    _tokens = _str.encode('utf-8').split()
 
     def __init__(self):
         self.object_number = None
@@ -906,6 +950,22 @@ class PdfIndirectObject(PdfObject):
         self.ref = None
         self.contents = None
         self.pdf_section = None
+
+    def __bytes__(self):
+        if self.attached is False:
+            raise PdfFormatError
+        contents = bytes(self.contents)
+        if not isinstance(self.contents, PdfStream):
+            contents = b'  %b' % contents
+        return b'\n'.join([
+            b' '.join([
+                bytes(PdfInteger(self.object_number)),
+                bytes(PdfInteger(self.generation_number)),
+                b'obj'
+            ]),
+            contents,
+            b'endobj'
+        ])
 
     @property
     def object_key(self):
@@ -925,20 +985,7 @@ class PdfIndirectObject(PdfObject):
         self.next_free_object = next_free_object
         self.free = True
 
-    def format(self):
-        if self.attached is False:
-            raise PdfFormatError
-        contents = self.contents.format()
-        if not isinstance(self.contents, PdfStream):
-            contents = textwrap.indent(contents, '  ')
-        return self._str.format(
-            object_number=self.object_number,
-            generation_number=self.generation_number,
-            contents=contents
-        )
-
     def parse(self, io_buffer):
-        _, _, _obj, _, _endobj = self._tokens
         line = next(read_lines(io_buffer), None)
         if line is None:
             raise PdfParseError
@@ -949,14 +996,12 @@ class PdfIndirectObject(PdfObject):
         self.generation_number = line_parts[1]
         self.contents = parse_pdf_object(io_buffer)
         final_token = next(read_pdf_tokens(io_buffer), None)
-        if final_token != _endobj:
+        if final_token != b'endobj':
             raise PdfParseError
         return self
 
 
 class PdfIndirectObjectRef(PdfObject):
-
-    _str = '{object_number} {generation_number} R'
 
     def __init__(self, object_number, generation_number):
         if not (isinstance(object_number, int) or isinstance(object_number, float)):
@@ -966,12 +1011,13 @@ class PdfIndirectObjectRef(PdfObject):
         self.object_number = object_number
         self.generation_number = generation_number
 
+    def __bytes__(self):
+        return b' '.join([
+            bytes(PdfInteger(self.object_number)),
+            bytes(PdfInteger(self.generation_number)),
+            b'R'
+        ])
+
     @property
     def object_key(self):
         return (self.object_number, self.generation_number)
-
-    def format(self):
-        return self._str.format(
-            object_number=self.object_number,
-            generation_number=self.generation_number
-        )
