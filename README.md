@@ -36,10 +36,10 @@ qpdfview /tmp/test.pdf
 
 ## Planned
 
-* support special stream whitespace
-* add date parsing
 * add image management capabilities
   * add image to page
+* support special stream whitespace
+* add date parsing
 * finish adding graphics operations
 * support more stream filters
 * add more text formatting options
@@ -47,7 +47,7 @@ qpdfview /tmp/test.pdf
   * more fonts
 * add methods to extract text/images from pdf + pages
 * expand unit testing
-* validate parser behavior with example PDFs
+* validate parser behavior with example PDFs (PDF spec doc)
 * add object stream support
 * add annotations support
 * add outline support

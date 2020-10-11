@@ -1,9 +1,12 @@
 import io
 
+from PIL import Image
+
 from pdfalcon.exceptions import PdfIoError, PdfBuildError, PdfFormatError, PdfParseError
 from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, PdfLiteralString, \
     ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
-    TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation
+    TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation, \
+    XObject
 from pdfalcon.options import get_inherited_entry, get_optional_entry
 from pdfalcon.parsing import read_lines, read_pdf_tokens, reverse_read_lines
 
@@ -669,9 +672,11 @@ class PageObject:
         self.media_box = None
         self.contents = None
         self.font_number = 0
+        self.image_number = 0
 
     def setup(self):
         self.resources = get_inherited_entry('resources', self, required=True)
+        self.resources[PdfName('ProcSet')] = PdfArray(set(self.resources.get('ProcSet', PdfArray()) + PdfArray([PdfName('PDF')])))
         self.media_box = get_inherited_entry('media_box', self, required=True)
         self.contents = PdfArray()
         self.pdf_object, _ = self.pdf_file.add_pdf_object(
@@ -717,6 +722,66 @@ class PageObject:
         self.resources['Font'][font_alias_name] = font.pdf_object.ref
         return font_alias_name
 
+    def add_image_xobject(self, io_buffer):
+        im = Image.open(io_buffer)
+
+        resolution = 72.0
+
+        bits = PdfInteger(8)
+        if im.mode == "1":
+            filter_type = PdfName("ASCIIHexDecode")
+            colorspace = PdfName("DeviceGray")
+            procset = PdfName("ImageB")  # grayscale
+            bits = PdfInteger(1)
+        elif im.mode == "L":
+            filter_type = PdfName("DCTDecode")
+            colorspace = PdfName("DeviceGray")
+            procset = PdfName("ImageB")  # grayscale
+        elif im.mode == "P":
+            filter_type = PdfName("ASCIIHexDecode")
+            palette = im.im.getpalette("RGB")
+            colorspace = PdfArray([
+                PdfName("Indexed"),
+                PdfName("DeviceRGB"),
+                PdfInteger(255),
+                PdfBinary(palette),
+            ])
+            procset = PdfName("ImageI")  # indexed color
+        elif im.mode == "RGB":
+            filter_type = PdfName("DCTDecode")
+            colorspace = PdfName("DeviceRGB")
+            procset = PdfName("ImageC")  # color images
+        elif im.mode == "CMYK":
+            filter_type = PdfName("DCTDecode")
+            colorspace = PdfName("DeviceCMYK")
+            procset = PdfName("ImageC")  # color images
+        else:
+            raise PdfBuildError(f"cannot save mode {im.mode}")
+
+        width, height = map(PdfReal, im.size)
+
+        io_buffer.seek(0, io.SEEK_SET)
+
+        image_xobject, _ = self.pdf_file.add_pdf_object(
+            PdfStream(
+                contents=[io_buffer.read()],
+                stream_dict=PdfDict({
+                    PdfName('Type'): PdfName("XObject"),
+                    PdfName('Subtype'): PdfName("Image"),
+                    PdfName('Width'): width,
+                    PdfName('Height'): height,
+                    PdfName('Filter'): filter_type,
+                    PdfName('BitsPerComponent'): bits,
+                    PdfName('ColorSpace'): colorspace,
+                })
+            )
+        )
+        self.image_number += 1
+        image_alias_name = PdfName(f'Im{self.image_number}')
+        self.resources.setdefault(PdfName('XObject'), PdfDict())[image_alias_name] = image_xobject.ref
+        self.resources[PdfName('ProcSet')] = PdfArray(set(self.resources.get('ProcSet', PdfArray()) + PdfArray([procset])))
+        return image_alias_name, resolution, width, height
+
     def add_content_stream(self, contents):
         stream = ContentStream(self.pdf_file, contents=contents).setup()
         if 'Contents' not in self.pdf_object.contents:
@@ -729,13 +794,6 @@ class PageObject:
             translate_x=None, translate_y=None, scale_x=None, scale_y=None,
             skew_angle_a=None, skew_angle_b=None, rotation_angle=None):
         font_alias_name = self.add_font(font_name)
-        text_obj = StreamTextObject(contents=[
-            TextMatrixOperation(),
-            TextFontOperation(font_alias_name=font_alias_name, size=size),
-            TextLeadingOperation(leading=line_size),
-            TextShowOperation(text=PdfLiteralString(text)),
-            TextNextLineOperation()
-        ])
         cm = ConcatenateMatrixOperation()
         if translate_x is not None or translate_y is not None:
             cm.add_translation(x=translate_x, y=translate_y)
@@ -745,13 +803,41 @@ class PageObject:
             cm.add_scaling(x=scale_x, y=scale_y)
         if skew_angle_a is not None or skew_angle_b is not None:
             cm.add_skew(angle_a=skew_angle_a, angle_b=skew_angle_b)
-        self.add_content_stream([
+        content_stream = self.add_content_stream([
             StateSaveOperation(),
             cm,
-            text_obj,
+            StreamTextObject(contents=[
+                TextMatrixOperation(),
+                TextFontOperation(font_alias_name=font_alias_name, size=size),
+                TextLeadingOperation(leading=line_size),
+                TextShowOperation(text=PdfLiteralString(text)),
+                TextNextLineOperation()
+            ]),
             StateRestoreOperation()
         ])
-        return text_obj
+        return content_stream
+
+    def add_image(self, io_buffer,
+            translate_x=None, translate_y=None, scale_x=None, scale_y=None,
+            skew_angle_a=None, skew_angle_b=None, rotation_angle=None):
+        image_alias_name, resolution, width, height = self.add_image_xobject(io_buffer)
+        cm = ConcatenateMatrixOperation()
+        cm.add_scaling(x=int(width * 72.0 / resolution), y=int(height * 72.0 / resolution))
+        if translate_x is not None or translate_y is not None:
+            cm.add_translation(x=translate_x, y=translate_y)
+        if rotation_angle is not None:
+            cm.add_rotation(rotation_angle)
+        if scale_x is not None or scale_y is not None:
+            cm.add_scaling(x=scale_x, y=scale_y)
+        if skew_angle_a is not None or skew_angle_b is not None:
+            cm.add_skew(angle_a=skew_angle_a, angle_b=skew_angle_b)
+        content_stream = self.add_content_stream([
+            StateSaveOperation(),
+            cm,
+            XObject(alias_name=image_alias_name),
+            StateRestoreOperation()
+        ])
+        return content_stream
 
 
 class Font:

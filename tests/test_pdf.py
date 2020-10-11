@@ -80,7 +80,8 @@ def test_write_text():
     assert sec.trailer.size == 4
     assert len(sec.body.objects) == 4
 
-    text_obj = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
+    content_stream = page.add_text("basic text", size=40, line_size=42, translate_x=150, translate_y=200, skew_angle_a=20, skew_angle_b=30)
+    text_obj = content_stream.contents[2]
     assert isinstance(text_obj, StreamTextObject)
     assert isinstance(pdf.document_catalog.page_tree.children[0].objects[0], ContentStream)
     assert len(pdf.document_catalog.page_tree.children[0].objects[0].contents) == 4
@@ -204,3 +205,15 @@ def test_clone(pdf=None):
     assert (set(sec.body.objects) & set(sec2.body.objects)) == {(0,65535), (1,0)}
 
     return new_pdf
+
+
+@pytest.mark.dependency()
+@write_to_file
+def test_write_image():
+    pdf = PdfFile()
+    page = pdf.add_page()
+
+    with open('./tests/omg.jpg', 'rb') as f:
+        text_obj = page.add_image(f)
+
+    return pdf

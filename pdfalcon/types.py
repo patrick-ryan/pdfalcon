@@ -8,6 +8,8 @@ import numbers
 import numpy as np
 import zlib
 
+from PIL import Image
+
 from pdfalcon.exceptions import PdfFormatError, PdfParseError, PdfValueError
 from pdfalcon.parsing import read_lines, read_pdf_tokens
 
@@ -473,6 +475,13 @@ class PdfStream(PdfObject):
                 contents = base64.a85encode(contents, adobe=True)[2:]
             elif stream_filter == 'FlateDecode':
                 contents = zlib.compress(contents)
+            elif stream_filter == 'DCTDecode':
+                im = Image.open(io.BytesIO(contents))
+                op = io.BytesIO()
+                im.save(op, 'JPEG')
+                contents = op.getvalue()
+            elif stream_filter == 'ASCIIHexDecode':
+                contents = contents.hex().encode('ascii')
             else:
                 raise PdfParseError
 
@@ -539,6 +548,10 @@ class PdfStream(PdfObject):
         elif first_token == b'BT':
             io_buffer.seek(start_offset, io.SEEK_SET)
             return StreamTextObject().parse(io_buffer)
+        elif first_token == b'Do':
+            if len(_op_args) != 1:
+                raise PdfParseError
+            return XObject(alias_name=_op_args[0])
         else:
             # must be an instruction arg
             io_buffer.seek(start_offset, io.SEEK_SET)
@@ -559,6 +572,11 @@ class PdfStream(PdfObject):
                 stream_contents = base64.a85decode(stream_contents, adobe=True)
             elif stream_filter == 'FlateDecode':
                 stream_contents = zlib.decompress(stream_contents)
+            elif stream_filter == 'DCTDecode':
+                im = Image.open(io.BytesIO(stream_contents))
+                stream_contents = im.tobytes()
+            elif stream_filter == 'ASCIIHexDecode':
+                stream_contents = bytes.fromhex(stream_contents.decode('ascii'))
             else:
                 raise PdfParseError
         stream_buffer = io.BytesIO(stream_contents)
@@ -907,6 +925,9 @@ class PdfArray(collections.abc.MutableSequence, PdfObject):
     def insert(self, index, value):
         return self.value.insert(index, value)
 
+    def __add__(self, value):
+        return self.value.__add__(list(value))
+
     def __bytes__(self):
         contents = map(bytes, self)
         if len(self) == 1:
@@ -1021,3 +1042,12 @@ class PdfIndirectObjectRef(PdfObject):
     @property
     def object_key(self):
         return (self.object_number, self.generation_number)
+
+
+class XObject(GraphicsObject):
+
+    def __init__(self, alias_name=None):
+        self.alias_name = alias_name
+
+    def __bytes__(self):
+        return b'%b Do' % bytes(self.alias_name)
