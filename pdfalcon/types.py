@@ -2,6 +2,7 @@ import abc
 import base64
 import codecs
 import collections
+import inspect
 import io
 import math
 import numbers
@@ -400,10 +401,11 @@ class PdfDict(collections.abc.MutableMapping, PdfObject):
         self.value = dict(value or {})
 
     def __bytes__(self):
-        formatter = lambda x: b'%b %b' % (bytes(x[0]), bytes(x[1]))
+        formatter = lambda x: b'  %b' % x
+        contents = [x for k,v in self.items() for x in (b'%b %b' % (bytes(k),bytes(v))).split(b'\n')]
         return b'\n'.join([
             b'<<',
-            b'\n  '.join(map(formatter, self.items())),
+            *map(formatter, contents),
             b'>>'
         ])
 
@@ -493,6 +495,22 @@ class PdfStream(PdfObject):
             b'endstream'
         ])
 
+    @property
+    def op_map(self):
+        return {
+            b'q': StateSaveOperation,
+            b'Q': StateRestoreOperation,
+            b'cm': ConcatenateMatrixOperation,
+            b'w': LineWidthOperation,
+            b'J': LineCapStyleOperation,
+            b'j': LineJoinStyleOperation,
+            b'M': MiterLimitOperation,
+            b'd': DashPatternOperation,
+            b'ri': ColorRenderIntentOperation,
+            b'i': FlatnessToleranceOperation,
+            b'gs': StateParametersOperation,
+        }
+    
     def _parse_stream_object(self, io_buffer, _op_args=None):
         _op_args = _op_args or []
         tokens = read_pdf_tokens(io_buffer)
@@ -500,58 +518,21 @@ class PdfStream(PdfObject):
         first_token = next(tokens, None)
         if first_token is None:
             return None
-        elif first_token == b'q':
-            return StateSaveOperation()
-        elif first_token == b'Q':
-            return StateRestoreOperation()
-        elif first_token == b'cm':
-            if len(_op_args) != 6:
+        elif first_token in self.op_map:
+            if len(_op_args) != len(inspect.signature(self.op_map[first_token]).parameters):
                 raise PdfParseError
-            a, b, c, d, e, f = _op_args
-            transformation_matrix = \
-                [[a, b, 0],
-                 [c, d, 0],
-                 [e, f, 1]]
-            return ConcatenateMatrixOperation(transformation_matrix=transformation_matrix)
-        elif first_token == b'w':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return LineWidthOperation(width=_op_args[0])
-        elif first_token == b'J':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return LineCapStyleOperation(cap_style=_op_args[0])
-        elif first_token == b'j':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return LineJoinStyleOperation(join_style=_op_args[0])
-        elif first_token == b'M':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return MiterLimitOperation(limit=_op_args[0])
-        elif first_token == b'd':
-            if len(_op_args) != 2:
-                raise PdfParseError
-            return DashPatternOperation(dash_array=_op_args[0], dash_phase=_op_args[1])
-        elif first_token == b'ri':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return ColorRenderIntentOperation(intent=_op_args[0])
-        elif first_token == b'i':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return FlatnessToleranceOperation(flatness=_op_args[0])
-        elif first_token == b'gs':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return StateParametersOperation(param_dict_name=_op_args[0])
+            return self.op_map[first_token](*_op_args)
         elif first_token == b'BT':
             io_buffer.seek(start_offset, io.SEEK_SET)
             return StreamTextObject().parse(io_buffer)
         elif first_token == b'Do':
-            if len(_op_args) != 1:
-                raise PdfParseError
-            return XObject(alias_name=_op_args[0])
+            return StreamXObject(*_op_args)
+        elif first_token == b'm':
+            contents = [PathMoveOperation(*_op_args)]
+            return StreamPathObject(contents=contents).parse(io_buffer)
+        elif first_token == b're':
+            contents = [PathRectangleOperation(*_op_args)]
+            return StreamPathObject(contents=contents).parse(io_buffer)
         else:
             # must be an instruction arg
             io_buffer.seek(start_offset, io.SEEK_SET)
@@ -606,45 +587,45 @@ class StateRestoreOperation(GraphicsOperation):
 
 class ConcatenateMatrixOperation(GraphicsOperation):
 
-    def __init__(self, transformation_matrix=None):
-        self.transformation_matrix = transformation_matrix or \
-            [[1, 0, 0],
-             [0, 1, 0],
-             [0, 0, 1]]
+    def __init__(self, a=1, b=0, c=0, d=1, e=0, f=0):
+        self.transformation_matrix = \
+            [[a, b, 0],
+             [c, d, 0],
+             [e, f, 1]]
 
     def __bytes__(self):
         [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
-        return b'%f %f %f %f %f %f cm' % (a, b, c, d, e, f)
+        return b'%b %b %b %b %b %b cm' % tuple(map(PdfReal, (a, b, c, d, e, f)))
 
-    def add_translation(self, x=None, y=None):
+    def add_translation(self, x=0, y=0):
         self.transformation_matrix = np.matmul(
             [[1, 0, 0],
              [0, 1, 0],
-             [x or 0, y or 0, 1]],
+             [x, y, 1]],
             self.transformation_matrix)
 
-    def add_scaling(self, x=None, y=None):
+    def add_scaling(self, x=1, y=1):
         self.transformation_matrix = np.matmul(
-            [[x or 1, 0, 0],
-             [0, y or 1, 0],
+            [[x, 0, 0],
+             [0, y, 0],
              [0, 0, 1]],
             self.transformation_matrix)
 
-    def add_skew(self, angle_a=None, angle_b=None):
-        angle_a_tan = math.tan((angle_a or 0)*math.pi/180)
-        angle_b_tan = math.tan((angle_b or 0)*math.pi/180)
+    def add_skew(self, angle_a=0, angle_b=0):
+        a = math.tan(angle_a*math.pi/180)
+        b = math.tan(angle_b*math.pi/180)
         self.transformation_matrix = np.matmul(
-            [[1, angle_a_tan, 0],
-             [angle_b_tan, 1, 0],
+            [[1, a, 0],
+             [b, 1, 0],
              [0, 0, 1]],
             self.transformation_matrix)
 
-    def add_rotation(self, angle=None):
-        angle_cos = math.cos((angle or 0)*math.pi/180)
-        angle_sin = math.sin((angle or 0)*math.pi/180)
+    def add_rotation(self, angle=0):
+        c = math.cos(angle*math.pi/180)
+        s = math.sin(angle*math.pi/180)
         self.transformation_matrix = np.matmul(
-            [[angle_cos, angle_sin, 0],
-             [-angle_sin, angle_cos, 0],
+            [[c, s, 0],
+             [-s, c, 0],
              [0, 0, 1]],
             self.transformation_matrix)
 
@@ -655,7 +636,7 @@ class LineWidthOperation(GraphicsOperation):
         self.width = width
 
     def __bytes__(self):
-        return b"%d w" % self.width
+        return b"%b w" % PdfReal(self.width)
 
 
 class LineCapStyleOperation(GraphicsOperation):
@@ -664,7 +645,7 @@ class LineCapStyleOperation(GraphicsOperation):
         self.cap_style = cap_style
 
     def __bytes__(self):
-        return b"%d J" % self.cap_style
+        return b"%b J" % PdfInteger(self.cap_style)
 
 
 class LineJoinStyleOperation(GraphicsOperation):
@@ -673,7 +654,7 @@ class LineJoinStyleOperation(GraphicsOperation):
         self.join_style = join_style
 
     def __bytes__(self):
-        return b"%d j" % self.join_style
+        return b"%b j" % PdfInteger(self.join_style)
 
 
 class MiterLimitOperation(GraphicsOperation):
@@ -682,7 +663,7 @@ class MiterLimitOperation(GraphicsOperation):
         self.limit = limit
 
     def __bytes__(self):
-        return b"%d M" % self.limit
+        return b"%b M" % PdfReal(self.limit)
 
 
 class DashPatternOperation(GraphicsOperation):
@@ -692,7 +673,8 @@ class DashPatternOperation(GraphicsOperation):
         self.dash_phase = dash_phase
 
     def __bytes__(self):
-        return b"%b %d d" % (bytes(self.dash_array), self.dash_phase)
+        assert any(self.dash_array)  # can't be all zeros
+        return b"%b %b d" % (PdfArray(*map(PdfReal(self.dash_array))), PdfReal(self.dash_phase))
 
 
 class ColorRenderIntentOperation(GraphicsOperation):
@@ -701,7 +683,7 @@ class ColorRenderIntentOperation(GraphicsOperation):
         self.intent = intent
 
     def __bytes__(self):
-        return b"%b ri" % bytes(self.intent)
+        return b"%b ri" % PdfName(self.intent)
 
 
 class FlatnessToleranceOperation(GraphicsOperation):
@@ -710,7 +692,8 @@ class FlatnessToleranceOperation(GraphicsOperation):
         self.flatness = flatness
 
     def __bytes__(self):
-        return b"%d i" % self.flatness
+        assert self.flatness >= 0 and self.flatness <= 100
+        return b"%b i" % PdfReal(self.flatness)
 
 
 class StateParametersOperation(GraphicsOperation):
@@ -719,99 +702,7 @@ class StateParametersOperation(GraphicsOperation):
         self.param_dict_name = param_dict_name
 
     def __bytes__(self):
-        return b"%b gs" % bytes(self.param_dict_name)
-
-
-class TextFontOperation(GraphicsOperation):
-
-    def __init__(self, font_alias_name=None, size=None):
-        self.font_alias_name = font_alias_name
-        self.size = size
-
-    def __bytes__(self):
-        return b"%b %d Tf" % (bytes(self.font_alias_name), self.size)
-
-
-class TextLeadingOperation(GraphicsOperation):
-
-    def __init__(self, leading=None):
-        self.leading = leading
-
-    def __bytes__(self):
-        return b"%d TL" % self.leading
-
-
-class TextMatrixOperation(GraphicsOperation):
-
-    def __init__(self, transformation_matrix=None):
-        self.transformation_matrix = transformation_matrix or \
-            [[1, 0, 0],
-             [0, 1, 0],
-             [0, 0, 1]]
-
-    def __bytes__(self):
-        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
-        return b'%f %f %f %f %f %f Tm' % (a, b, c, d, e, f)
-
-
-class TextNextLineOperation(GraphicsOperation):
-
-    def __bytes__(self):
-        return b'T*'
-
-
-class TextShowOperation(GraphicsOperation):
-
-    def __init__(self, text=None):
-        self.text = text
-
-    def __bytes__(self):
-        return b"%b Tj" % bytes(self.text)
-
-
-class TextCharSpaceOperation(GraphicsOperation):
-
-    def __init__(self, char_space=None):
-        self.char_space = char_space
-
-    def __bytes__(self):
-        return b"%d Tc" % self.char_space
-
-
-class TextWordSpaceOperation(GraphicsOperation):
-
-    def __init__(self, word_space=None):
-        self.word_space = word_space
-
-    def __bytes__(self):
-        return b"%d Tw" % self.word_space
-
-
-class TextScaleOperation(GraphicsOperation):
-
-    def __init__(self, scale=None):
-        self.scale = scale
-
-    def __bytes__(self):
-        return b"%d Tz" % self.scale
-
-
-class TextRenderModeOperation(GraphicsOperation):
-
-    def __init__(self, render_mode=None):
-        self.render_mode = render_mode
-
-    def __bytes__(self):
-        return "%d Tr" % self.render_mode
-
-
-class TextRiseOperation(GraphicsOperation):
-
-    def __init__(self, rise=None):
-        self.rise = rise
-
-    def __bytes__(self):
-        return b"%d Ts" % self.rise
+        return b"%b gs" % PdfName(self.param_dict_name)
 
 
 class StreamTextObject(GraphicsObject):
@@ -820,12 +711,29 @@ class StreamTextObject(GraphicsObject):
         self.contents = contents or []
 
     def __bytes__(self):
-        formatter = lambda x: b'  %b' % bytes(x)
+        formatter = lambda x: b'  %b' % x
+        contents = map(bytes, self.contents)
+        contents = [x for c in contents for x in c.split(b'\n')]
         return b'\n'.join([
-            b'BT ',
-            *map(formatter, self.contents),
+            b'BT',
+            *map(formatter, contents),
             b'ET'
         ])
+
+    @property
+    def op_map(self):
+        return {
+            b'Tj': TextShowOperation,
+            b'TL': TextLeadingOperation,
+            b'Tf': TextFontOperation,
+            b'Tm': TextMatrixOperation,
+            b'T*': TextNextLineOperation,
+            b'Tc': TextCharSpaceOperation,
+            b'Tw': TextWordSpaceOperation,
+            b'Tz': TextScaleOperation,
+            b'Tr': TextRenderModeOperation,
+            b'Ts': TextRiseOperation,
+        }
 
     def parse(self, io_buffer):
         tokens = read_pdf_tokens(io_buffer)
@@ -844,65 +752,108 @@ class StreamTextObject(GraphicsObject):
                 if len(_op_args) != 0:
                     raise PdfParseError
                 break
-            elif token == b'Tj':
-                if len(_op_args) != 1:
+            elif token in self.op_map:
+                if len(_op_args) != len(inspect.signature(self.op_map[token]).parameters):
                     raise PdfParseError
-                self.contents.append(TextShowOperation(text=_op_args[0]))
-                _op_args = []
-            elif token == b'TL':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextLeadingOperation(leading=_op_args[0]))
-                _op_args = []
-            elif token == b'Tf':
-                if len(_op_args) != 2:
-                    raise PdfParseError
-                self.contents.append(TextFontOperation(font_alias_name=_op_args[0], size=_op_args[1]))
-                _op_args = []
-            elif token == b'Tm':
-                if len(_op_args) != 6:
-                    raise PdfParseError
-                a, b, c, d, e, f = _op_args
-                transformation_matrix = \
-                    [[a, b, 0],
-                     [c, d, 0],
-                     [e, f, 1]]
-                self.contents.append(TextMatrixOperation(transformation_matrix=transformation_matrix))
-                _op_args = []
-            elif token == b'T*':
-                if len(_op_args) != 0:
-                    raise PdfParseError
-                self.contents.append(TextNextLineOperation())
-            elif token == b'Tc':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextCharSpaceOperation(char_space=_op_args[0]))
-                _op_args = []
-            elif token == b'Tw':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextWordSpaceOperation(word_space=_op_args[0]))
-                _op_args = []
-            elif token == b'Tz':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextScaleOperation(scale=_op_args[0]))
-                _op_args = []
-            elif token == b'Tr':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextRenderModeOperation(render_mode=_op_args[0]))
-                _op_args = []
-            elif token == b'Ts':
-                if len(_op_args) != 1:
-                    raise PdfParseError
-                self.contents.append(TextRiseOperation(rise=_op_args[0]))
+                self.contents.append(self.op_map[token](*_op_args))
                 _op_args = []
             else:
                 io_buffer.seek(start_offset, io.SEEK_SET)
                 _op_args.append(parse_pdf_object(io_buffer))
                 tokens = read_pdf_tokens(io_buffer)
         return self
+
+
+class TextFontOperation(GraphicsOperation):
+
+    def __init__(self, font_alias_name=None, size=None):
+        self.font_alias_name = font_alias_name
+        self.size = size
+
+    def __bytes__(self):
+        return b"%b %b Tf" % (PdfName(self.font_alias_name), PdfReal(self.size))
+
+
+class TextLeadingOperation(GraphicsOperation):
+
+    def __init__(self, leading=None):
+        self.leading = leading
+
+    def __bytes__(self):
+        return b"%b TL" % PdfReal(self.leading)
+
+
+class TextMatrixOperation(GraphicsOperation):
+
+    def __init__(self, a=1, b=0, c=0, d=1, e=0, f=0):
+        self.transformation_matrix = \
+            [[a, b, 0],
+             [c, d, 0],
+             [e, f, 1]]
+
+    def __bytes__(self):
+        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
+        return b'%b %b %b %b %b %b Tm' % tuple(map(PdfReal, (a, b, c, d, e, f)))
+
+
+class TextNextLineOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'T*'
+
+
+class TextShowOperation(GraphicsOperation):
+
+    def __init__(self, text=None):
+        self.text = text
+
+    def __bytes__(self):
+        return b"%b Tj" % PdfLiteralString(self.text)
+
+
+class TextCharSpaceOperation(GraphicsOperation):
+
+    def __init__(self, char_space=None):
+        self.char_space = char_space
+
+    def __bytes__(self):
+        return b"%b Tc" % PdfReal(self.char_space)
+
+
+class TextWordSpaceOperation(GraphicsOperation):
+
+    def __init__(self, word_space=None):
+        self.word_space = word_space
+
+    def __bytes__(self):
+        return b"%b Tw" % PdfReal(self.word_space)
+
+
+class TextScaleOperation(GraphicsOperation):
+
+    def __init__(self, scale=None):
+        self.scale = scale
+
+    def __bytes__(self):
+        return b"%b Tz" % PdfReal(self.scale)
+
+
+class TextRenderModeOperation(GraphicsOperation):
+
+    def __init__(self, render_mode=None):
+        self.render_mode = render_mode
+
+    def __bytes__(self):
+        return "%b Tr" % PdfInteger(self.render_mode)
+
+
+class TextRiseOperation(GraphicsOperation):
+
+    def __init__(self, rise=None):
+        self.rise = rise
+
+    def __bytes__(self):
+        return b"%b Ts" % PdfReal(self.rise)
 
 
 class PdfArray(collections.abc.MutableSequence, PdfObject):
@@ -929,13 +880,18 @@ class PdfArray(collections.abc.MutableSequence, PdfObject):
         return self.value.__add__(list(value))
 
     def __bytes__(self):
-        contents = map(bytes, self)
-        if len(self) == 1:
+        contents = list(map(bytes, self))
+        if len(contents) == 1 and b'\n' not in contents[0]:
             contents = b' '.join(contents)
-            return b"[ %b ]" % contents
+            return b'[ %b ]' % contents
         else:
-            contents = b'\n  '.join(contents)
-            return b"[\n%b\n]" % contents
+            formatter = lambda x: b'  %b' % x
+            contents = [x for c in contents for x in c.split(b'\n')]
+            return b'\n'.join([
+                b'[',
+                *map(formatter, contents),
+                b']'
+            ])
 
 
 class PdfName(PdfString):
@@ -977,7 +933,8 @@ class PdfIndirectObject(PdfObject):
             raise PdfFormatError
         contents = bytes(self.contents)
         if not isinstance(self.contents, PdfStream):
-            contents = b'  %b' % contents
+            formatter = lambda x: b'  %b' % x
+            contents = b'\n'.join(map(formatter, contents.split(b'\n')))
         return b'\n'.join([
             b' '.join([
                 bytes(PdfInteger(self.object_number)),
@@ -1044,10 +1001,278 @@ class PdfIndirectObjectRef(PdfObject):
         return (self.object_number, self.generation_number)
 
 
-class XObject(GraphicsObject):
+class StreamXObject(GraphicsObject):
 
     def __init__(self, alias_name=None):
         self.alias_name = alias_name
 
     def __bytes__(self):
-        return b'%b Do' % bytes(self.alias_name)
+        return b'%b Do' % self.alias_name
+
+
+class StreamPathObject(GraphicsObject):
+
+    def __init__(self, contents=None):
+        self.contents = contents or []
+
+    def __bytes__(self):
+        contents = map(bytes, self.contents)
+        formatter = lambda x: b'  %b' % x
+        return b'\n'.join(map(formatter, [x for c in contents for x in c.split(b'\n')]))
+
+    @property
+    def op_map(self):
+        return {
+            b'm': PathMoveOperation,
+            b're': PathRectangleOperation,
+            b'l': PathLineOperation,
+            b'c': PathCurveOperation,
+            b'v': PathCurve2Operation,
+            b'c': PathCurve3Operation,
+            b'h': PathCloseOperation,
+        }
+
+    @property
+    def path_paint_op_map(self):
+        return {
+            b'S': PathStrokeOperation,
+            b's': PathCloseStrokeOperation,
+            b'f': PathFillOperation,
+            b'F': _PathFillOperation,
+            b'f*': PathFillEvenOddOperation,
+            b'B': PathFillStrokeOperation,
+            b'B*': PathFillEvenOddStrokeOperation,
+            b'b': PathCloseFillStrokeOperation,
+            b'b*': PathCloseFillEvenOddStrokeOperation,
+            b'n': PathNoOpOperation,
+        }
+
+    def parse(self, io_buffer):
+        tokens = read_pdf_tokens(io_buffer)
+        first_token = next(tokens, None)
+        if first_token is None:
+            # unexpect EOF
+            raise PdfParseError
+        _op_args = []
+        while True:
+            start_offset = io_buffer.tell()
+            token = next(tokens, None)
+            if token is None:
+                # unexpect EOF
+                raise PdfParseError
+            if token in self.path_paint_op_map:
+                if len(_op_args) != len(inspect.signature(self.path_paint_op_map[token]).parameters):
+                    raise PdfParseError
+                self.contents.append(self.path_paint_op_map[token](*_op_args))
+                break
+            elif token in (b'W', b'W*'):
+                contents = [PathClipOperation()] if token == b'W' else [PathClipEvenOddOperation()]
+                self.contents.append(StreamClippingPathObject(contents=contents).parse(io_buffer))
+                break
+            elif token in self.op_map:
+                if len(_op_args) != len(inspect.signature(self.op_map[token]).parameters):
+                    raise PdfParseError
+                self.contents.append(self.op_map[token](*_op_args))
+                _op_args = []
+            else:
+                io_buffer.seek(start_offset, io.SEEK_SET)
+                _op_args.append(parse_pdf_object(io_buffer))
+                tokens = read_pdf_tokens(io_buffer)
+        return self
+
+
+class PathMoveOperation(GraphicsOperation):
+
+    def __init__(self, x=None, y=None):
+        self.x = x
+        self.y = y
+
+    def __bytes__(self):
+        return b'%b %b m' % (PdfReal(self.x), PdfReal(self.y))
+
+
+class PathRectangleOperation(GraphicsOperation):
+
+    def __init__(self, x=None, y=None, width=None, height=None):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+    def __bytes__(self):
+        return b'%b %b %b %b re' % (PdfReal(self.x), PdfReal(self.y), PdfReal(self.width), PdfReal(self.height))
+
+
+class PathLineOperation(GraphicsOperation):
+
+    def __init__(self, x=None, y=None):
+        self.x = x
+        self.y = y
+
+    def __bytes__(self):
+        return b'%b %b l' % (PdfReal(self.x), PdfReal(self.y))
+
+
+class PathCurveOperation(GraphicsOperation):
+
+    def __init__(self, x1=None, y1=None, x2=None, y2=None, x3=None, y3=None):
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
+        self.x3 = x3
+        self.y3 = y3
+
+    def __bytes__(self):
+        return b'%b %b %b %b %b %b c' % tuple(map(PdfReal, (self.x1, self.y1, self.x2, self.y2, self.x3, self.y3)))
+
+
+class PathCurve2Operation(GraphicsOperation):
+
+    def __init__(self, x2=None, y2=None, x3=None, y3=None):
+        self.x2 = x2
+        self.y2 = y2
+        self.x3 = x3
+        self.y3 = y3
+
+    def __bytes__(self):
+        return b'%b %b %b %b v' % (PdfReal(self.x2), PdfReal(self.y2), PdfReal(self.x3), PdfReal(self.y3))
+
+
+class PathCurve3Operation(GraphicsOperation):
+
+    def __init__(self, x1=None, y1=None, x3=None, y3=None):
+        self.x1 = x1
+        self.y1 = y1
+        self.x3 = x3
+        self.y3 = y3
+
+    def __bytes__(self):
+        return b'%b %b %b %b c' % (PdfReal(self.x1), PdfReal(self.y1), PdfReal(self.x3), PdfReal(self.y3))
+
+
+class PathCloseOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'h'
+
+
+class PathStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'S'
+
+
+class PathCloseStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b's'
+
+
+class PathFillOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'f'
+
+
+class _PathFillOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'F'
+
+
+class PathFillEvenOddOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'f*'
+
+
+class PathFillStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'B'
+
+
+class PathFillEvenOddStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'B*'
+
+
+class PathCloseFillStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'b'
+
+
+class PathCloseFillEvenOddStrokeOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'b*'
+
+
+class PathNoOpOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'n'
+
+
+class PathClipOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'W'
+
+
+class PathClipEvenOddOperation(GraphicsOperation):
+
+    def __bytes__(self):
+        return b'W*'
+
+
+class StreamClippingPathObject(GraphicsObject):
+
+    def __init__(self, contents=None):
+        self.contents = contents or []
+
+    def __bytes__(self):
+        contents = map(bytes, self.contents)
+        return b'\n'.join(contents)
+
+    @property
+    def path_paint_op_map(self):
+        return {
+            b'S': PathStrokeOperation,
+            b's': PathCloseStrokeOperation,
+            b'f': PathFillOperation,
+            b'F': _PathFillOperation,
+            b'f*': PathFillEvenOddOperation,
+            b'B': PathFillStrokeOperation,
+            b'B*': PathFillEvenOddStrokeOperation,
+            b'b': PathCloseFillStrokeOperation,
+            b'b*': PathCloseFillEvenOddStrokeOperation,
+            b'n': PathNoOpOperation,
+        }
+
+    def parse(self, io_buffer):
+        tokens = read_pdf_tokens(io_buffer)
+        first_token = next(tokens, None)
+        if first_token is None:
+            # unexpect EOF
+            raise PdfParseError
+        _op_args = []
+        while True:
+            start_offset = io_buffer.tell()
+            token = next(tokens, None)
+            if token is None:
+                # unexpect EOF
+                raise PdfParseError
+            if token in self.path_paint_op_map:
+                if len(_op_args) != len(inspect.signature(self.path_paint_op_map[token]).parameters):
+                    raise PdfParseError
+                self.contents.append(self.path_paint_op_map[token](*_op_args))
+                break
+            else:
+                io_buffer.seek(start_offset, io.SEEK_SET)
+                _op_args.append(parse_pdf_object(io_buffer))
+                tokens = read_pdf_tokens(io_buffer)
+        return self

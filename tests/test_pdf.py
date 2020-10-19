@@ -43,7 +43,7 @@ def read_from_file(write_fn):
         @functools.wraps(test)
         def fn(*args, **kwargs):
             with open(f'{OUTPUT_DIR}/{write_fn.__name__}.pdf', 'rb') as f:
-                pdf = PdfFile(setup=False).read(f)
+                pdf = PdfFile.read(f)
             test(*args, pdf=pdf, **kwargs)
         return fn
     return param_fn
@@ -214,6 +214,18 @@ def test_write_image():
     page = pdf.add_page()
 
     with open('./tests/omg.jpg', 'rb') as f:
-        text_obj = page.add_image(f)
+        # original size = 926 x 521
+        text_obj = page.add_image(f, scale_x=463, scale_y=260.5, translate_x=50, translate_y=300, skew_angle_a=10, skew_angle_b=10)
+
+    return pdf
+
+
+@pytest.mark.dependency()
+@write_to_file
+def test_write_ellipse():
+    pdf = PdfFile()
+    page = pdf.add_page()
+
+    text_obj = page.add_ellipse(50, 400, 25, 40)
 
     return pdf

@@ -22,7 +22,7 @@ Parsing a pdf:
 ```python
 from pdfalcon.pdf import PdfFile
 with open('/tmp/test.pdf', 'rb') as f:
-    pdf = PdfFile(setup=False).read(f)
+    pdf = PdfFile.read(f)
 ```
 
 
@@ -36,22 +36,26 @@ qpdfview /tmp/test.pdf
 
 ## Planned
 
-* add image management capabilities
-  * add image to page
+* support inline image object
+* support color operators
+* support shade object
 * support special stream whitespace
-* add date parsing
-* finish adding graphics operations
 * support more stream filters
+* support object stream
+* support annotations
+* support outline
+* support comments
+* validate parser behavior with example PDFs (PDF spec doc)
+* element-based testing framework
+* improve errors / document validation
+* add date parsing
+* add more shapes
 * add more text formatting options
   * line wrapping
+  * content shrinking
   * more fonts
 * add methods to extract text/images from pdf + pages
 * expand unit testing
-* validate parser behavior with example PDFs (PDF spec doc)
-* add object stream support
-* add annotations support
-* add outline support
-* add comments support
 * add remaining page layout options
 * documentation
 * icon (multidirectional F with falcon outline)

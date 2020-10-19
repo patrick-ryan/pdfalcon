@@ -1,12 +1,14 @@
 import io
+import math
 
 from PIL import Image
 
 from pdfalcon.exceptions import PdfIoError, PdfBuildError, PdfFormatError, PdfParseError
 from pdfalcon.types import PdfArray, PdfDict, PdfIndirectObject, PdfInteger, PdfName, PdfReal, PdfStream, PdfLiteralString, \
-    ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, \
+    ConcatenateMatrixOperation, StateRestoreOperation, StateSaveOperation, StreamTextObject, StreamXObject, StreamPathObject, \
     TextFontOperation, TextLeadingOperation, TextMatrixOperation, TextNextLineOperation, TextShowOperation, \
-    XObject
+    PathMoveOperation, PathCurveOperation, PathCloseOperation, PathStrokeOperation, PathFillOperation, \
+    PathFillEvenOddOperation, PathFillStrokeOperation, PathFillEvenOddStrokeOperation
 from pdfalcon.options import get_inherited_entry, get_optional_entry
 from pdfalcon.parsing import read_lines, read_pdf_tokens, reverse_read_lines
 
@@ -79,7 +81,6 @@ class PdfFile:
 
     def parse(self, io_buffer):
         # create pdf file and document structures from pdf syntax
-        self.__init__(setup=False)
         self.header = FileHeader(self)
         self.header.parse(io_buffer)
 
@@ -152,16 +153,14 @@ class PdfFile:
             raise PdfIoError
         io_buffer.write(bytes(self))
 
-    def read(self, io_buffer):
+    @classmethod
+    def read(cls, io_buffer):
         # validate and parse an io buffer
-        if self.document_catalog is not None:
-            # already built
-            raise PdfBuildError
         if not isinstance(io_buffer, io.IOBase):
             raise PdfIoError
         if not io_buffer.seekable():
             raise PdfIoError
-        return self.parse(io_buffer)
+        return cls(setup=False).parse(io_buffer)
 
     def merge(self, pdf):
         self.add_update()
@@ -725,8 +724,6 @@ class PageObject:
     def add_image_xobject(self, io_buffer):
         im = Image.open(io_buffer)
 
-        resolution = 72.0
-
         bits = PdfInteger(8)
         if im.mode == "1":
             filter_type = PdfName("ASCIIHexDecode")
@@ -780,7 +777,7 @@ class PageObject:
         image_alias_name = PdfName(f'Im{self.image_number}')
         self.resources.setdefault(PdfName('XObject'), PdfDict())[image_alias_name] = image_xobject.ref
         self.resources[PdfName('ProcSet')] = PdfArray(set(self.resources.get('ProcSet', PdfArray()) + PdfArray([procset])))
-        return image_alias_name, resolution, width, height
+        return image_alias_name, im
 
     def add_content_stream(self, contents):
         stream = ContentStream(self.pdf_file, contents=contents).setup()
@@ -810,34 +807,85 @@ class PageObject:
                 TextMatrixOperation(),
                 TextFontOperation(font_alias_name=font_alias_name, size=size),
                 TextLeadingOperation(leading=line_size),
-                TextShowOperation(text=PdfLiteralString(text)),
+                TextShowOperation(text=text),
                 TextNextLineOperation()
             ]),
             StateRestoreOperation()
         ])
         return content_stream
 
-    def add_image(self, io_buffer,
+    def add_image(self, io_buffer, resolution=72.0,
             translate_x=None, translate_y=None, scale_x=None, scale_y=None,
             skew_angle_a=None, skew_angle_b=None, rotation_angle=None):
-        image_alias_name, resolution, width, height = self.add_image_xobject(io_buffer)
+        image_alias_name, im = self.add_image_xobject(io_buffer)
         cm = ConcatenateMatrixOperation()
-        cm.add_scaling(x=int(width * 72.0 / resolution), y=int(height * 72.0 / resolution))
         if translate_x is not None or translate_y is not None:
             cm.add_translation(x=translate_x, y=translate_y)
         if rotation_angle is not None:
             cm.add_rotation(rotation_angle)
         if scale_x is not None or scale_y is not None:
             cm.add_scaling(x=scale_x, y=scale_y)
+        else:
+            width, height = im.size
+            cm.add_scaling(x=int(width * 72.0 / resolution), y=int(height * 72.0 / resolution))
         if skew_angle_a is not None or skew_angle_b is not None:
             cm.add_skew(angle_a=skew_angle_a, angle_b=skew_angle_b)
         content_stream = self.add_content_stream([
             StateSaveOperation(),
             cm,
-            XObject(alias_name=image_alias_name),
+            StreamXObject(alias_name=image_alias_name),
             StateRestoreOperation()
         ])
         return content_stream
+
+    @staticmethod
+    def _compute_bounded_bezier_path(x1, y1, x2, y2, start_angle=0, extent=90):
+        curve_count = int(math.ceil(abs(extent)/90.0))
+        curve_angle = float(extent) / curve_count
+
+        x_cen = (x1+x2)/2.0
+        y_cen = (y1+y2)/2.0
+        x_dist = abs(x2-x1)/2.0
+        y_dist = abs(y2-y1)/2.0
+
+        h = curve_angle * math.pi / 360.0
+        kappa = abs(4.0 / 3.0 * (1.0 - math.cos(h)) / math.sin(h))
+
+        sign = 1 if curve_angle > 0 else -1
+
+        curves = []
+        for i in range(curve_count):
+            theta0 = (start_angle + i*curve_angle) * math.pi / 180.0
+            theta1 = (start_angle + (i+1)*curve_angle) * math.pi / 180.0
+
+            curves.append((
+                x_cen + x_dist * math.cos(theta0),
+                y_cen - y_dist * math.sin(theta0),
+                x_cen + x_dist * (math.cos(theta0) - sign * kappa * math.sin(theta0)),
+                y_cen - y_dist * (math.sin(theta0) + sign * kappa * math.cos(theta0)),
+                x_cen + x_dist * (math.cos(theta1) + sign * kappa * math.sin(theta1)),
+                y_cen - y_dist * (math.sin(theta1) - sign * kappa * math.cos(theta1)),
+                x_cen + x_dist * math.cos(theta1),
+                y_cen - y_dist * math.sin(theta1)
+            ))
+
+        return curves
+
+    def add_ellipse(self, x, y, width, height, fill=False, stroke=True, fill_rule='nonzero-winding-number'):
+        curves = self._compute_bounded_bezier_path(x, y, x+width, y+height, extent=360)
+        start_x,start_y,*_ = curves[0]
+        content_stream = self.add_content_stream([
+            StreamPathObject(contents=[
+                PathMoveOperation(x=start_x,y=start_y),
+                *[PathCurveOperation(*curve) for _,_,*curve in curves],
+                PathCloseOperation(),
+                PathStrokeOperation()
+            ])
+        ])
+        return content_stream
+
+    def add_circle(self, x, y, r):
+        return self.add_ellipse(x-r, y-r, 2*r, 2*r)
 
 
 class Font:
