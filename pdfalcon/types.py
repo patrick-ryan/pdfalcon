@@ -2,11 +2,13 @@ import abc
 import base64
 import codecs
 import collections
+import dataclasses
 import inspect
 import io
 import math
 import numbers
 import numpy as np
+import typing
 import zlib
 
 from PIL import Image
@@ -87,7 +89,7 @@ def parse_pdf_object(io_buffer):
             if dict_post_token == b'stream':
                 # stream type
                 next(read_lines(io_buffer))
-                return PdfStream(stream_dict=result).parse(io_buffer)
+                return PdfStream(stream_dict=result).parse(io_buffer, skip_stream_dict=True)
             else:
                 io_buffer.seek(dict_end_offset, io.SEEK_SET)
                 return result
@@ -202,9 +204,6 @@ class BaseObject(abc.ABC):
     def __bytes__(self):
         pass
 
-    def __eq__(self, obj):
-        return type(obj) == type(self) and vars(obj) == vars(self)
-
     @classmethod
     def _clone_obj(cls, obj):
         if isinstance(obj, list):
@@ -253,9 +252,6 @@ class PdfNull(PdfObject):
 
 
 class PdfNumeric(numbers.Real, PdfObject):
-
-    def __repr__(self):
-        return self.value.__repr__()
 
     def __eq__(self, other):
         return self.value.__eq__(other)
@@ -349,37 +345,46 @@ class PdfNumeric(numbers.Real, PdfObject):
         return self.__class__(value)
 
 
+@dataclasses.dataclass(eq=False)
 class PdfInteger(PdfNumeric):
 
-    def __init__(self, value=None):
-        self.value = int(value or 0)
+    value: numbers.Real
+
+    def __init__(self, *args, **kwargs):
+        self.value = int(*args, **kwargs)
 
     def __bytes__(self):
         return b'%d' % self.value
 
 
+@dataclasses.dataclass(eq=False)
 class PdfReal(PdfNumeric):
 
-    def __init__(self, value=None):
-        self.value = float(value or 0)
+    value: numbers.Real
+
+    def __init__(self, *args, **kwargs):
+        self.value = float(*args, **kwargs)
 
     def __bytes__(self):
         return b'%f' % self.value
 
 
+@dataclasses.dataclass
 class PdfString(PdfObject):
 
-    def __init__(self, value=None):
-        self.value = str(value or '')
+    value: str
+
+    def __init__(self, *args, **kwargs):
+        self.value = str(*args, **kwargs)
 
     def __getitem__(self, index):
-        return self.value[index]
+        return self.value.__getitem__(index)
 
-    def __eq__(self, str_):
-        return str.__eq__(self.value, str_)
+    def __eq__(self, other):
+        return self.value.__eq__(other)
 
     def __hash__(self):
-        return str.__hash__(self.value)
+        return self.value.__hash__()
 
 
 class PdfHexString(PdfString):
@@ -395,10 +400,11 @@ class PdfLiteralString(PdfString):
         return b'(%b)' % (self.value.encode('utf_16_be'))
 
 
+@dataclasses.dataclass
 class PdfDict(collections.abc.MutableMapping, PdfObject):
 
-    def __init__(self, value=None):
-        self.value = dict(value or {})
+    def __init__(self, *args, **kwargs):
+        self.value = dict(*args, **kwargs)
 
     def __bytes__(self):
         formatter = lambda x: b'  %b' % x
@@ -456,19 +462,18 @@ class PdfDict(collections.abc.MutableMapping, PdfObject):
         return self
 
 
+@dataclasses.dataclass
 class PdfStream(PdfObject):
 
-    def __init__(self, stream_dict=None, contents=None, filters=None):
-        self.stream_dict = stream_dict
-        self.contents = contents or []
+    stream_dict: PdfDict = dataclasses.field(default_factory=PdfDict)
+    contents: list = dataclasses.field(default_factory=list)
 
     def __bytes__(self):
         if self.contents is None:
             raise PdfFormatError
         contents = b'\n'.join(map(bytes, self.contents))
-        stream_dict = PdfDict(self.stream_dict or {})
 
-        stream_filters = stream_dict.get('Filter', [])
+        stream_filters = self.stream_dict.get('Filter', [])
         if isinstance(stream_filters, PdfName):
             stream_filters = [stream_filters]
         for stream_filter in stream_filters[::-1]:
@@ -487,9 +492,9 @@ class PdfStream(PdfObject):
             else:
                 raise PdfParseError
 
-        stream_dict.update({PdfName('Length'): PdfInteger(len(contents))})
+        self.stream_dict.update({PdfName('Length'): PdfInteger(len(contents))})
         return b'\n'.join([
-            bytes(stream_dict),
+            bytes(self.stream_dict),
             b'stream',
             contents,
             b'endstream'
@@ -539,8 +544,8 @@ class PdfStream(PdfObject):
             _op_args.append(parse_pdf_object(io_buffer).value)
             return self._parse_stream_object(io_buffer, _op_args=_op_args)
 
-    def parse(self, io_buffer):
-        if self.stream_dict is None:
+    def parse(self, io_buffer, skip_stream_dict=False):
+        if self.skip_stream_dict is False:
             self.stream_dict = PdfDict().parse(io_buffer)
 
         stream_length = int(self.stream_dict['Length'])
@@ -573,29 +578,44 @@ class PdfStream(PdfObject):
         return self
 
 
+@dataclasses.dataclass
 class StateSaveOperation(GraphicsOperation):
 
     def __bytes__(self):
         return b'q'
 
 
+@dataclasses.dataclass
 class StateRestoreOperation(GraphicsOperation):
 
     def __bytes__(self):
         return b'Q'
 
 
+@dataclasses.dataclass
 class ConcatenateMatrixOperation(GraphicsOperation):
 
-    def __init__(self, a=1, b=0, c=0, d=1, e=0, f=0):
-        self.transformation_matrix = \
-            [[a, b, 0],
-             [c, d, 0],
-             [e, f, 1]]
+    a: numbers.Real = 1
+    b: numbers.Real = 0
+    c: numbers.Real = 0
+    d: numbers.Real = 1
+    e: numbers.Real = 0
+    f: numbers.Real = 0
+
+    @property
+    def transformation_matrix(self):
+        return \
+            [[self.a, self.b, 0],
+             [self.c, self.d, 0],
+             [self.e, self.f, 1]]
+
+    @transformation_matrix.setter
+    def transformation_matrix(self, value):
+        [self.a, self.b, _], [self.c, self.d, _], [self.e, self.f, _] = value
 
     def __bytes__(self):
-        [a, b, _], [c, d, _], [e, f, _] = self.transformation_matrix
-        return b'%b %b %b %b %b %b cm' % tuple(map(PdfReal, (a, b, c, d, e, f)))
+        values = (self.a, self.b, self.c, self.d, self.e, self.f)
+        return b'%b %b %b %b %b %b cm' % tuple(map(PdfReal, values))
 
     def add_translation(self, x=0, y=0):
         self.transformation_matrix = np.matmul(
@@ -630,24 +650,25 @@ class ConcatenateMatrixOperation(GraphicsOperation):
             self.transformation_matrix)
 
 
+@dataclasses.dataclass
 class LineWidthOperation(GraphicsOperation):
 
-    def __init__(self, width=None):
-        self.width = width
+    width: numbers.Real
 
     def __bytes__(self):
         return b"%b w" % PdfReal(self.width)
 
 
+@dataclasses.dataclass
 class LineCapStyleOperation(GraphicsOperation):
 
-    def __init__(self, cap_style=None):
-        self.cap_style = cap_style
+    cap_style: numbers.Real
 
     def __bytes__(self):
         return b"%b J" % PdfInteger(self.cap_style)
 
 
+@dataclasses.dataclass
 class LineJoinStyleOperation(GraphicsOperation):
 
     def __init__(self, join_style=None):
@@ -657,6 +678,7 @@ class LineJoinStyleOperation(GraphicsOperation):
         return b"%b j" % PdfInteger(self.join_style)
 
 
+@dataclasses.dataclass
 class MiterLimitOperation(GraphicsOperation):
 
     def __init__(self, limit=None):
@@ -666,6 +688,7 @@ class MiterLimitOperation(GraphicsOperation):
         return b"%b M" % PdfReal(self.limit)
 
 
+@dataclasses.dataclass
 class DashPatternOperation(GraphicsOperation):
 
     def __init__(self, dash_array=None, dash_phase=None):
@@ -677,6 +700,7 @@ class DashPatternOperation(GraphicsOperation):
         return b"%b %b d" % (PdfArray(*map(PdfReal(self.dash_array))), PdfReal(self.dash_phase))
 
 
+@dataclasses.dataclass
 class ColorRenderIntentOperation(GraphicsOperation):
 
     def __init__(self, intent=None):
@@ -686,6 +710,7 @@ class ColorRenderIntentOperation(GraphicsOperation):
         return b"%b ri" % PdfName(self.intent)
 
 
+@dataclasses.dataclass
 class FlatnessToleranceOperation(GraphicsOperation):
 
     def __init__(self, flatness=None):
@@ -696,6 +721,7 @@ class FlatnessToleranceOperation(GraphicsOperation):
         return b"%b i" % PdfReal(self.flatness)
 
 
+@dataclasses.dataclass
 class StateParametersOperation(GraphicsOperation):
 
     def __init__(self, param_dict_name=None):
@@ -705,6 +731,7 @@ class StateParametersOperation(GraphicsOperation):
         return b"%b gs" % PdfName(self.param_dict_name)
 
 
+@dataclasses.dataclass
 class StreamTextObject(GraphicsObject):
 
     def __init__(self, contents=None):
@@ -764,6 +791,7 @@ class StreamTextObject(GraphicsObject):
         return self
 
 
+@dataclasses.dataclass
 class TextFontOperation(GraphicsOperation):
 
     def __init__(self, font_alias_name=None, size=None):

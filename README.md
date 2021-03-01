@@ -63,6 +63,27 @@ qpdfview /tmp/test.pdf
 * support encryption
 
 
+## Notes
+
+* don't bother running mypy until numeric tower support is resolved:
+    https://github.com/python/mypy/issues/3186
+
+    ```python
+    import numbers
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Test:
+        a: numbers.Real
+
+    Test(1)
+    ```
+    ```shell
+    $ mypy test.py
+    test.py:8: error: Argument 1 to "Test" has incompatible type "int"; expected "Real"
+    ```
+
+
 ## Expansion
 
 * define common API spec for file formats, used for conversion support
